@@ -1,0 +1,28 @@
+# CE-PDPTW HetGAT-RL dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+# On Compute Canada use:
+#   pip install --no-index torch torchvision torchaudio
+#   pip install --no-index torch-geometric torch-scatter torch-sparse
+#   pip install --no-index numpy scipy matplotlib
+# (wheels are pre-built in the CC software stack; versions below are minimums)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Core deep-learning
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Graph neural network (HetGAT encoder)
+torch-geometric>=2.4.0
+torch-scatter>=2.1.0    # required by PyG scatter ops
+torch-sparse>=0.6.18    # required by PyG sparse matmul
+
+# Numerical / scientific
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Visualisation
+matplotlib>=3.7.0
+
+# Optional baselines (comment out if not using)
+gurobipy>=10.0.0        # Gurobi MIP baseline (requires separate licence)
+ortools>=9.7.0          # OR-Tools SCIP/CP baseline

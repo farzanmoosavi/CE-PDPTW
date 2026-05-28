@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Cache / data files (regenerated on Narval)
+*.pkl
+cache_train_*.pkl
+cache_valid_*.pkl
+
+# Model checkpoints — tracked separately, not in git
+# (use scp/rsync to transfer .pt files if resuming training)
+CE-PDPTW-*-HetGAT/*.pt
+CE-PDPTW-*-HetGAT/checkpoint.pth
+# Keep costs.txt so training history is visible
+!CE-PDPTW-*-HetGAT/costs.txt
+
+# SLURM job output
+logs/
+*.out
+*.err
+slurm-*.out
+
+# Results (large — transfer manually after runs)
+rolling_benchmark_results/
+eval_results/
+results_rung*/
+coalition_results/
+*.json
+*.csv
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+
+# Claude Code local files
+claude.exe
+*.zip
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated outputs
+figures/
+*_smoke.png
