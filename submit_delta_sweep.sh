@@ -19,7 +19,7 @@
 # ============================================================
 
 #SBATCH --job-name=CE-PDPTW-delta-sweep
-#SBATCH --account=def-farooq
+#SBATCH --account=def-bfarooq
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -37,8 +37,8 @@ source ~/py310_nibi/bin/activate
 
 export MPLBACKEND=Agg
 
-_PROJ="$HOME/projects/def-farooq/farzan97/CE-PDPTW"
-[ -d "$HOME/links/projects/def-farooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-farooq/farzan97/CE-PDPTW"
+_PROJ="$HOME/projects/def-bfarooq/farzan97/CE-PDPTW"
+[ -d "$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW"
 cd "$_PROJ"
 mkdir -p logs eval_results
 

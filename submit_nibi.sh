@@ -23,7 +23,7 @@
 # ============================================================
 
 #SBATCH --job-name=CE-PDPTW-train
-#SBATCH --account=def-farooq
+#SBATCH --account=def-bfarooq
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
@@ -43,8 +43,8 @@ source ~/py310_nibi/bin/activate
 # MPS is for sharing one GPU across multiple processes — not applicable here and
 # Error 805 (MPS client failed to connect) blocks CUDA init on all ranks.
 
-_PROJ="$HOME/projects/def-farooq/farzan97/CE-PDPTW"
-[ -d "$HOME/links/projects/def-farooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-farooq/farzan97/CE-PDPTW"
+_PROJ="$HOME/projects/def-bfarooq/farzan97/CE-PDPTW"
+[ -d "$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW"
 cd "$_PROJ"
 mkdir -p logs
 

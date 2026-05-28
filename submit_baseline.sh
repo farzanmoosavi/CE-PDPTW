@@ -10,7 +10,7 @@
 # ============================================================
 
 #SBATCH --job-name=CE-PDPTW-baselines
-#SBATCH --account=def-farooq
+#SBATCH --account=def-bfarooq
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -84,8 +84,8 @@ $_HAVE_GRB && BL_AB="$BL_AB,gurobi" && BL_C="$BL_C,gurobi"
 $_HAVE_ORT && BL_AB="$BL_AB,ortools"   # OR-Tools A/B only — too slow at n_req>=25
 BL_D="fifo,greedy,alns,offline_alns"   # exact solvers never tractable at n_req=60
 
-_PROJ="$HOME/projects/def-farooq/farzan97/CE-PDPTW"
-[ -d "$HOME/links/projects/def-farooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-farooq/farzan97/CE-PDPTW"
+_PROJ="$HOME/projects/def-bfarooq/farzan97/CE-PDPTW"
+[ -d "$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW"
 cd "$_PROJ"
 mkdir -p logs
 

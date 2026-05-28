@@ -23,7 +23,7 @@
 # ============================================================
 
 #SBATCH --job-name=CE-PDPTW-scenarios
-#SBATCH --account=def-farooq
+#SBATCH --account=def-bfarooq
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -68,8 +68,8 @@ else
     echo "WARNING: Gurobi license check failed — Gurobi excluded."
 fi
 
-_PROJ="$HOME/projects/def-farooq/farzan97/CE-PDPTW"
-[ -d "$HOME/links/projects/def-farooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-farooq/farzan97/CE-PDPTW"
+_PROJ="$HOME/projects/def-bfarooq/farzan97/CE-PDPTW"
+[ -d "$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW"
 cd "$_PROJ"
 mkdir -p logs
 
