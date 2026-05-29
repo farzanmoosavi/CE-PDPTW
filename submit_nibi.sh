@@ -135,14 +135,31 @@ RDZV_PORT=$((29500 + ${SLURM_JOB_ID:-0} % 1000))
 python - <<'PROBE'
 import torch, sys
 ok = torch.cuda.is_available()
-n  = torch.cuda.device_count()
+# Use real CUDA count; DirectML can fake device_count=1 even when CUDA unavailable.
+n = torch.cuda.device_count() if ok else 0
 print(f'[probe] CUDA available={ok}  device_count={n}')
 for i in range(n):
-    print(f'[probe]   GPU {i}: {torch.cuda.get_device_name(i)}')
+    try:
+        print(f'[probe]   GPU {i}: {torch.cuda.get_device_name(i)}')
+    except Exception as e:
+        print(f'[probe]   GPU {i}: <name unavailable: {e}>')
 if not ok:
     print('[probe] ERROR: no CUDA GPUs — aborting before torchrun', file=sys.stderr)
+    print('[probe] Check: module load cuda/12.2 loaded, torch installed with CUDA support.', file=sys.stderr)
+    print('[probe] Verify: python -c "import torch; print(torch.version.cuda)"', file=sys.stderr)
     sys.exit(1)
 PROBE
+PROBE_EXIT=$?
+if [ $PROBE_EXIT -ne 0 ]; then
+    echo "ERROR: CUDA probe failed (exit $PROBE_EXIT) — torchrun will NOT be launched."
+    echo "Diagnosis steps on a login node:"
+    echo "  module purge && module load python/3.10 scipy-stack cuda/12.2"
+    echo "  source ~/py310_nibi/bin/activate"
+    echo "  python -c \"import torch; print('CUDA:', torch.cuda.is_available(), torch.version.cuda)\""
+    echo "If CUDA shows False, reinstall torch with the CUDA 12.1 wheel:"
+    echo "  pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu121"
+    exit 1
+fi
 
 python -m torch.distributed.run \
     --nproc_per_node=$N_GPUS \
