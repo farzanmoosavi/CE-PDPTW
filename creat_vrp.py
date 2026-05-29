@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
 import pickle
+import os
 import random
 import math
 from reward import ALPHA_U as _ALPHA_U_REWARD
