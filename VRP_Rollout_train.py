@@ -505,21 +505,25 @@ def train():
             start_epoch, costs = 0, []
             rung_idx = RUNG_ORDER.index(RUNG)
             if rung_idx > 0 and _WARMSTART:
-                prev_folder  = f'CE-PDPTW-{RUNG_ORDER[rung_idx - 1]}-HetGAT'
-                prev_best    = os.path.join(prev_folder, 'best_actor.pt')
-                prev_ckpt    = os.path.join(prev_folder, 'checkpoint.pth')
+                prev_rung = RUNG_ORDER[rung_idx - 1]
+                # Must use the same variant suffix so we look in the right folder
+                prev_tag    = f'{prev_rung}-{_VARIANT}' if _VARIANT else prev_rung
+                prev_folder = f'CE-PDPTW-{prev_tag}-HetGAT'
+                prev_best   = os.path.join(prev_folder, 'best_actor.pt')
+                prev_ckpt   = os.path.join(prev_folder, 'checkpoint.pth')
                 if os.path.exists(prev_best):
                     prev_sd = torch.load(prev_best, map_location=device, weights_only=False)
                     _inner(actor).load_state_dict(prev_sd, strict=False)
                     if RANK == 0:
-                        print(f'Warm-started from Rung {RUNG_ORDER[rung_idx-1]} '
-                              f'(best_actor.pt)', flush=True)
+                        print(f'[warmstart] Rung {prev_rung} best_actor.pt → Rung {RUNG}', flush=True)
                 elif os.path.exists(prev_ckpt):
                     prev_sd = torch.load(prev_ckpt, map_location=device, weights_only=False)['model_state_dict']
                     _inner(actor).load_state_dict(prev_sd, strict=False)
                     if RANK == 0:
-                        print(f'Warm-started from Rung {RUNG_ORDER[rung_idx-1]} '
-                              f'(checkpoint.pth — best_actor.pt not found)', flush=True)
+                        print(f'[warmstart] Rung {prev_rung} checkpoint.pth → Rung {RUNG} (best_actor.pt not found)', flush=True)
+                else:
+                    if RANK == 0:
+                        print(f'[warmstart] WARNING: {prev_folder} not found — starting from random init.', flush=True)
             elif not _WARMSTART and RANK == 0:
                 print(f'[init] Rung {RUNG} starting from random init (use --warmstart for curriculum).', flush=True)
             if IS_DIST:
