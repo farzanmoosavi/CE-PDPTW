@@ -327,8 +327,14 @@ def train():
     conv_layers = _cfg.get('conv_layers', 3)
 
     _no_workers = _is_directml or not torch.cuda.is_available()
-    train_workers = 0 if _no_workers else 4
-    val_workers   = 0 if _no_workers else 2
+    if _no_workers:
+        train_workers = val_workers = 0
+    else:
+        # Divide SLURM-allocated CPUs evenly across DDP ranks; cap at sane limits.
+        _total_cpus   = int(os.environ.get('SLURM_CPUS_PER_TASK', 8))
+        _cpus_per_rank = max(1, _total_cpus // max(WORLD_SIZE, 1))
+        train_workers = min(8, max(2, _cpus_per_rank - 1))
+        val_workers   = min(4, max(1, _cpus_per_rank // 3))
 
     _run_tag = f'{RUNG}-{_VARIANT}' if _VARIANT else RUNG
     folder = f'CE-PDPTW-{_run_tag}-HetGAT'
