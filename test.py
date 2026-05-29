@@ -293,3 +293,6 @@ if __name__ == "__main__":
   #
   # Phase 4 — learned trigger (research contribution, not engineering):
   #   [ ] Trigger MLP on c_t with penalty-augmented reward
+
+# git fetch origin
+# git reset --hard origin/master
