@@ -727,7 +727,7 @@ class CoopDecoder(nn.Module):
                         _ask_buf[depot_mask, :num_depots] = False
 
                 log_p = torch.stack(log_p_list, dim=1)
-                index = _sel_buf
+                index = _sel_buf.clone()
             actions.append(index.unsqueeze(2))
 
             is_done = (mask1[:, :, num_depots:].max(dim=1)[0].sum(1).unsqueeze(1)
