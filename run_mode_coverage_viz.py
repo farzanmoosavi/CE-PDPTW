@@ -175,7 +175,7 @@ def main():
                         help="Requests per instance")
     parser.add_argument("--output-dir", default="figures",
                         help="Directory to save output PNGs and JSON")
-    parser.add_argument("--cache-path", default="mississauga_networks.pkl",
+    parser.add_argument("--cache-path", default="cache/mississauga_networks.pkl",
                         help="Path to the OSM network pickle cache")
     parser.add_argument("--rebuild-cache", action="store_true",
                         help="Rebuild the OSM network cache from scratch")

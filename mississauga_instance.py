@@ -45,7 +45,7 @@ class MississaugaNetworks:
     cache_key: str
 
 _NETWORKS_CACHE: Optional[MississaugaNetworks] = None
-_CACHE_PATH_DEFAULT = "mississauga_networks.pkl"
+_CACHE_PATH_DEFAULT = "cache/mississauga_networks.pkl"
 
 def _project_lonlat_to_local_km(lon: np.ndarray, lat: np.ndarray,
                                  lon0: float, lat0: float) -> np.ndarray:
@@ -145,6 +145,7 @@ def _build_networks_from_osm(cache_path: str) -> MississaugaNetworks:
         cache_key=cache_key,
     )
 
+    os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
     with open(cache_path, "wb") as f:
         pickle.dump(nets, f)
     print(f"[mississauga] Saved network cache to {cache_path}")

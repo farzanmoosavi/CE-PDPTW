@@ -432,6 +432,7 @@ def creat_data(n_req, n_uav, n_adr, n_depots_uav, n_depots_adr,
             dataset = CEPDPTWDataset(n_req, n_uav, n_adr, n_depots_uav, n_depots_adr,
                                      num_samples, seed=seed, **_tw_kwargs)
             if rank == 0:
+                os.makedirs(os.path.dirname(os.path.abspath(cache_file)), exist_ok=True)
                 with open(cache_file, 'wb') as f:
                     pickle.dump(dataset, f)
                 print('Saved dataset to cache.')

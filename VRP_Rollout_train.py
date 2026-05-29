@@ -72,6 +72,9 @@ RUNG = 'A'
 
 RUNG_ORDER = ['A', 'B', 'C', 'D']
 
+CACHE_DIR = 'cache'
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 RUNG_CONFIG = {
     'A': dict(n_req=5,  n_uav=2,  n_adr=2, n_depots_uav=1, n_depots_adr=1,
               train_size=1_280_000, batch_size=512, val_size=10_240, streaming=True,
@@ -371,8 +374,8 @@ def train():
             print(f'\nConfig: lr={lr} (eff={effective_lr:.2e}), bs={batch_size}×{WORLD_SIZE}, '
                   f'h={h_node}, conv={conv_layers}, rung={RUNG}', flush=True)
 
-        cache_train = f'cache_train_{RUNG}.pkl'
-        cache_valid = f'cache_valid_{RUNG}.pkl'
+        cache_train = os.path.join(CACHE_DIR, f'train_{RUNG}.pkl')
+        cache_valid = os.path.join(CACHE_DIR, f'valid_{RUNG}.pkl')
 
         train_loader = creat_data(
             n_req, n_uav, n_adr, n_depots_uav, n_depots_adr,
@@ -413,7 +416,7 @@ def train():
                 batch_size=batch_size,
                 streaming=False,
                 use_cache=True,
-                cache_file=f'cache_shadow_{RUNG}_s{_vs}_n{_shadow_val_size}.pkl',
+                cache_file=os.path.join(CACHE_DIR, f'shadow_{RUNG}_s{_vs}_n{_shadow_val_size}.pkl'),
                 seed=_vs,
                 shuffle=False,
                 num_workers=val_workers,
@@ -429,7 +432,7 @@ def train():
                 batch_size=batch_size,
                 streaming=False,
                 use_cache=True,
-                cache_file=f'cache_shadow_{RUNG}_hard_s{_hs}_n{_shadow_val_size}.pkl',
+                cache_file=os.path.join(CACHE_DIR, f'shadow_{RUNG}_hard_s{_hs}_n{_shadow_val_size}.pkl'),
                 seed=_hs,
                 shuffle=False,
                 num_workers=val_workers,

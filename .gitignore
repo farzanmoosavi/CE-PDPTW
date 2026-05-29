@@ -8,10 +8,9 @@ __pycache__/
 dist/
 build/
 
-# Cache / data files (regenerated on Narval)
+# Cache / data files (regenerated on HPC)
+cache/
 *.pkl
-cache_train_*.pkl
-cache_valid_*.pkl
 
 # Model checkpoints — tracked separately, not in git
 # (use scp/rsync to transfer .pt files if resuming training)
