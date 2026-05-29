@@ -708,7 +708,7 @@ class CoopDecoder(nn.Module):
                         else torch.randperm(n_agents, device=emb_uav.device))
                 for step_i in range(n_agents):
                     ag = int(perm[step_i].item())
-                    mu = u[:, ag, :].masked_fill(_ask_buf, float('-inf'))
+                    mu = u[:, ag, :].masked_fill(_ask_buf.clone(), float('-inf'))
                     all_masked_ag = (mu == float('-inf')).all(dim=-1, keepdim=True)
                     mu_safe = mu.masked_fill(all_masked_ag, 0.0)
                     log_probs = F.log_softmax(mu_safe.clamp(min=-1e9), dim=-1)
