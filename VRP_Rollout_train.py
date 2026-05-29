@@ -531,7 +531,7 @@ def train():
         max_epochs = _QUICK_MAX_EPOCHS if _QUICK_MAX_EPOCHS is not None else (_CLI_MAX_EPOCHS or 100)
         if _SMOKE and RANK == 0:
             print(
-                f'\n[SMOKE] Pipeline check: Rung A, {train_size} train, '
+                f'\n[SMOKE] Pipeline check: Rung {RUNG}, {train_size} train, '
                 f'{val_size} val, {max_epochs} epochs, device={device}',
                 flush=True,
             )
