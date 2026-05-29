@@ -590,6 +590,16 @@ class CoopDecoder(nn.Module):
         i = 0
         _max_steps = num_nodes + n_agents * 4
 
+        # Pre-compute loop-invariant tensors (avoid repeated allocation inside while loop)
+        _batch_range_uav = torch.arange(batch_size, device=emb_uav.device).unsqueeze(1).expand(-1, num_uav)
+        _batch_range_adr = torch.arange(batch_size, device=emb_uav.device).unsqueeze(1).expand(-1, num_adr)
+        _deadline_exp    = deadline.unsqueeze(1)   # [B, 1, N] — deadline doesn't change
+        # Sequential selection: pre-allocate; reset in-place each step
+        _sel_buf  = emb_uav.new_zeros(batch_size, n_agents, dtype=torch.long)
+        _ask_buf  = emb_uav.new_zeros(batch_size, emb_uav.size(1), dtype=torch.bool)
+        # Agent permutation — greedy order is fixed; stochastic is re-drawn each step
+        _perm_greedy = torch.arange(n_agents, device=emb_uav.device)
+
         while (mask1[:, :, num_depots:].max(dim=1)[0]).eq(0).any() and i < _max_steps:
             if i == 0:
                 if n_depots_uav is not None and n_depots_uav > 0:
@@ -666,18 +676,12 @@ class CoopDecoder(nn.Module):
             q_uav = self.mha_uav(dec_input[:, :num_uav, :], K_uav, V_uav, mask[:, :num_uav, :])
             q_adr = self.mha_adr(dec_input[:, num_uav:, :], K_adr, V_adr, mask[:, num_uav:, :])
 
-            dist_uav = edge_attr_uav[
-                torch.arange(batch_size, device=emb_uav.device).unsqueeze(1).expand(-1, num_uav),
-                index[:, :num_uav]
-            ]
-            dist_adr = edge_attr_adr[
-                torch.arange(batch_size, device=emb_uav.device).unsqueeze(1).expand(-1, num_adr),
-                index[:, num_uav:]
-            ]
+            dist_uav = edge_attr_uav[_batch_range_uav, index[:, :num_uav]]
+            dist_adr = edge_attr_adr[_batch_range_adr, index[:, num_uav:]]
             dist_bias_uav = self.dist_compat_uav(dist_uav.unsqueeze(-1)).squeeze(-1)
             dist_bias_adr = self.dist_compat_adr(dist_adr.unsqueeze(-1)).squeeze(-1)
 
-            slack = (deadline.unsqueeze(1) - T_t) / 120.0
+            slack = (_deadline_exp - T_t) / 120.0
             urgency_bias_uav = self.urgency_proj_uav(
                 slack[:, :num_uav, :].unsqueeze(-1)
             ).squeeze(-1).masked_fill(mask[:, :num_uav, :].bool(), 0.0)
@@ -696,16 +700,15 @@ class CoopDecoder(nn.Module):
             if parallel_select:
                 index, log_p = _parallel_select(u, num_depots, greedy)
             else:
-                selected   = torch.zeros(batch_size, n_agents, dtype=torch.long, device=emb_uav.device)
+                # Reuse pre-allocated buffers (avoid per-step malloc)
+                _sel_buf.zero_()
+                _ask_buf.zero_()
                 log_p_list = [None] * n_agents
-                ask = torch.zeros(batch_size, emb_uav.size(1), dtype=torch.bool, device=emb_uav.device)
-                # Randomise selection order during stochastic training to remove
-                # first-agent dominance bias; use fixed order at greedy eval.
-                perm = (torch.randperm(n_agents, device=emb_uav.device)
-                        if not greedy else torch.arange(n_agents, device=emb_uav.device))
+                perm = (_perm_greedy if greedy
+                        else torch.randperm(n_agents, device=emb_uav.device))
                 for step_i in range(n_agents):
                     ag = int(perm[step_i].item())
-                    mu = u[:, ag, :].masked_fill(ask, float('-inf'))
+                    mu = u[:, ag, :].masked_fill(_ask_buf, float('-inf'))
                     all_masked_ag = (mu == float('-inf')).all(dim=-1, keepdim=True)
                     mu_safe = mu.masked_fill(all_masked_ag, 0.0)
                     log_probs = F.log_softmax(mu_safe.clamp(min=-1e9), dim=-1)
@@ -713,17 +716,18 @@ class CoopDecoder(nn.Module):
                         mi = torch.multinomial(log_probs.detach().exp(), 1).squeeze(1)
                     else:
                         mi = mu_safe.max(dim=-1)[1]
-                    selected[:, ag] = mi
+                    _sel_buf[:, ag] = mi
                     lp = log_probs.gather(1, mi.unsqueeze(1)).squeeze(1)
                     lp = lp.masked_fill(all_masked_ag.squeeze(-1), 0.0)
                     log_p_list[ag] = lp
-                    ask = ask.scatter(1, mi.unsqueeze(1), True)
-                    if mi.lt(num_depots).any():
-                        ask = ask.clone()
-                        ask[mi.lt(num_depots), :num_depots] = False
+                    _ask_buf.scatter_(1, mi.unsqueeze(1), True)
+                    # Depot chosen: that depot stays available to other agents
+                    depot_mask = mi.lt(num_depots)
+                    if depot_mask.any():
+                        _ask_buf[depot_mask, :num_depots] = False
 
                 log_p = torch.stack(log_p_list, dim=1)
-                index = selected
+                index = _sel_buf
             actions.append(index.unsqueeze(2))
 
             is_done = (mask1[:, :, num_depots:].max(dim=1)[0].sum(1).unsqueeze(1)
