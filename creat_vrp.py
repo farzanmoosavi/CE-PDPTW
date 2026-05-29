@@ -424,7 +424,10 @@ def creat_data(n_req, n_uav, n_adr, n_depots_uav, n_depots_adr,
                 dataset = pickle.load(f)
             if rank == 0:
                 print('Loaded dataset from cache.')
-        except FileNotFoundError:
+        except (FileNotFoundError, EOFError):
+            if rank == 0 and os.path.exists(cache_file):
+                print(f'Cache {cache_file} corrupted — deleting and regenerating.')
+                os.remove(cache_file)
             dataset = CEPDPTWDataset(n_req, n_uav, n_adr, n_depots_uav, n_depots_adr,
                                      num_samples, seed=seed, **_tw_kwargs)
             if rank == 0:

@@ -181,8 +181,9 @@ if _DYNAMIC and not _VARIANT:
     _VARIANT = 'dynamic'
 
 if _SMOKE:
-    RUNG = 'A'
-    RUNG_CONFIG['A'].update(
+    if _cli_args.rung is None:
+        RUNG = 'A'
+    RUNG_CONFIG[RUNG].update(
         train_size=256, batch_size=32, val_size=64, streaming=False
     )
     _SHADOW_VAL_SIZE = min(_SHADOW_VAL_SIZE, 32)
