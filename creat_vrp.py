@@ -425,7 +425,7 @@ def creat_data(n_req, n_uav, n_adr, n_depots_uav, n_depots_adr,
                 dataset = pickle.load(f)
             if rank == 0:
                 print('Loaded dataset from cache.')
-        except (FileNotFoundError, EOFError):
+        except (FileNotFoundError, EOFError, pickle.UnpicklingError, ValueError):
             if rank == 0 and os.path.exists(cache_file):
                 print(f'Cache {cache_file} corrupted — deleting and regenerating.')
                 os.remove(cache_file)

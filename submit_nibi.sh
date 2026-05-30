@@ -144,6 +144,9 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null
 echo "========================================================"
 
 export BL_EVAL_FREQ=5
+# Fail fast when a rank crashes: 120s instead of the default 600s.
+# Keeps the NCCL watchdog from wasting 10 min of GPU time on a dead peer.
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=120
 
 # Use a per-job unique rendezvous port so two chained jobs on the same node
 # don't collide if scheduled back-to-back (29500 + last 3 digits of JOBID).
