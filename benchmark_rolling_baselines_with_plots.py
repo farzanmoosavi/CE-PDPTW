@@ -26,6 +26,7 @@ from ce_cpdptw_rolling_baselines import (
     solve_static_instance_with_gurobi_rolling,
     solve_static_instance_with_ortools_rolling,
 )
+from ce_cpdptw_ortools_vrp import solve_static_instance_with_ortools_vrp_rolling
 
 SUMMARY_KEYS = [
     "baseline",
@@ -536,6 +537,19 @@ def run_one_baseline(
                 solver_id=ortools_solver_id,
             )
 
+        elif baseline == "ortools_vrp":
+            episode_log = solve_static_instance_with_ortools_vrp_rolling(
+                full_instance,
+                n_uav=n_uav,
+                n_adr=n_adr,
+                n_depots_uav=n_depots_uav,
+                n_depots_adr=n_depots_adr,
+                depot_sharing=depot_sharing,
+                delta_minutes=delta_minutes,
+                shift_minutes=shift_minutes,
+                time_limit_seconds=min(exact_time_limit_seconds, 10.0),
+            )
+
         else:
             raise ValueError(f"Unknown baseline: {baseline}")
 
@@ -744,7 +758,7 @@ def _worker_run_instance(task: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
     baselines = [item.strip().lower() for item in args.baselines.split(",") if item.strip()]
-    valid = {"alns", "offline_alns", "fifo", "greedy", "gurobi", "ortools", "rl"}
+    valid = {"alns", "offline_alns", "fifo", "greedy", "gurobi", "ortools", "ortools_vrp", "rl"}
     invalid = [baseline for baseline in baselines if baseline not in valid]
     if invalid:
         raise ValueError(f"Unknown baselines: {invalid}")
