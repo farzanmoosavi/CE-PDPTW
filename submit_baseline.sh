@@ -70,17 +70,30 @@ else
 fi
 
 # ── Gurobi ───────────────────────────────────────────────────
-# Use the Narval site module — floating license, no internet needed.
-# gurobipy must match the module version; install from CC wheelhouse.
+# Use the Narval site module — gurobipy must match the module version.
 module load gurobi/12.0.0
 pip install gurobipy==12.0.0 --no-index
 
+# ── Gurobi license (academic named-user) ────────────────────
+# Point to the local .lic file in the project directory so Gurobi
+# validates offline — no CC token server needed.
+# Resolve project directory early so the license path is correct.
+_PROJ="$HOME/projects/def-bfarooq/farzan97/CE-PDPTW"
+[ -d "$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW"
+
+_GUROBI_LIC="$_PROJ/gurobi.lic"
+if [ -f "$_GUROBI_LIC" ]; then
+    export GRB_LICENSE_FILE="$_GUROBI_LIC"
+    echo "Using Gurobi license: $GRB_LICENSE_FILE"
+else
+    echo "WARNING: gurobi.lic not found at $_GUROBI_LIC — Gurobi may fall back to token server."
+fi
+
 # ── Gurobi license pre-flight check ─────────────────────────
-# CC uses a token server at license1.computecanada.ca (internal).
-# First checkout can take 60-90s; use 120s timeout.
-echo "Testing Gurobi license via CC token server (120s timeout)..."
+# Named-user license validates locally (no network); 30s is generous.
+echo "Testing Gurobi license (30s timeout)..."
 _HAVE_GRB=false
-if timeout 120 python -c "
+if timeout 30 python -c "
 import gurobipy as gp
 gp.setParam('OutputFlag', 0)
 m = gp.Model()
@@ -89,9 +102,8 @@ m.dispose()
     _HAVE_GRB=true
     echo "Gurobi license OK."
 else
-    echo "WARNING: Gurobi license check failed (token server unreachable or timed out)."
-    echo "  Gurobi will be EXCLUDED from baselines for this run."
-    echo "  The CC token server (license1.computecanada.ca) may be busy or down."
+    echo "WARNING: Gurobi license check failed — Gurobi will be EXCLUDED from baselines."
+    echo "  Check that gurobi.lic is valid and GRB_LICENSE_FILE is set correctly."
 fi
 
 # Build per-rung baselines strings based on what's available.
@@ -110,8 +122,6 @@ $_HAVE_GRB && BL_AB="$BL_AB,gurobi" && BL_C="$BL_C,gurobi"
 $_HAVE_ORT && BL_AB="$BL_AB,ortools"   # OR-Tools MILP A/B only — too slow at n_req>=25
 BL_D="fifo,greedy,alns,offline_alns"   # exact solvers never tractable at n_req=60
 
-_PROJ="$HOME/projects/def-bfarooq/farzan97/CE-PDPTW"
-[ -d "$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW"
 cd "$_PROJ"
 mkdir -p logs
 
