@@ -25,13 +25,13 @@ module purge
 module load python/3.10 scipy-stack
 source ~/py310_nibi/bin/activate
 
-# ── OR-Tools ─────────────────────────────────────────────────
+# ── OR-Tools (MILP linear solver) ────────────────────────────
 # SCIP backend segfaults on CC (ABI mismatch).  Use GLPK instead — it is bundled
 # inside the ortools wheel and needs no external library.  Probe before enabling.
-# OR-Tools is only used for Rungs A/B (small); too slow at n_req>=25.
+# OR-Tools MILP is only used for Rungs A/B (small); too slow at n_req>=25.
 _HAVE_ORT=false
 _ORT_SOLVER="GLPK"
-echo "Testing OR-Tools with GLPK backend..."
+echo "Testing OR-Tools GLPK (linear solver) backend..."
 if timeout 30 python -c "
 from ortools.linear_solver import pywraplp
 s = pywraplp.Solver.CreateSolver('GLPK')
@@ -43,7 +43,30 @@ s.Solve()
     _HAVE_ORT=true
     echo "OR-Tools GLPK OK."
 else
-    echo "OR-Tools GLPK probe failed — OR-Tools will be EXCLUDED."
+    echo "OR-Tools GLPK probe failed — OR-Tools MILP will be EXCLUDED."
+fi
+
+# ── OR-Tools VRP routing solver (pywrapcp) ────────────────────
+# Different API from the MILP solver above — tests the constraint-programming
+# routing engine used by ortools_vrp baseline.  Also probes for ABI issues.
+_HAVE_VRP=false
+echo "Testing OR-Tools VRP routing (pywrapcp) backend..."
+if timeout 30 python -c "
+from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+mgr = pywrapcp.RoutingIndexManager(4, 1, [0], [3])
+rt = pywrapcp.RoutingModel(mgr)
+def tt(fi, ti): return 1
+cb = rt.RegisterTransitCallback(tt)
+rt.SetArcCostEvaluatorOfAllVehicles(cb)
+p = pywrapcp.DefaultRoutingSearchParameters()
+p.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
+sol = rt.SolveWithParameters(p)
+assert sol is not None
+" 2>/dev/null; then
+    _HAVE_VRP=true
+    echo "OR-Tools VRP (pywrapcp) OK."
+else
+    echo "OR-Tools VRP probe failed — ortools_vrp baseline will be EXCLUDED."
 fi
 
 # ── Gurobi ───────────────────────────────────────────────────
@@ -80,8 +103,9 @@ fi
 #                  (oracle planner reference; tests value of online re-planning)
 #   ortools_vrp  — rolling-horizon OR-Tools VRP routing (pywrapcp.RoutingModel,
 #                  ~8s/re-plan, GLS metaheuristic; primary RL comparison baseline)
-BL_AB="fifo,greedy,alns,offline_alns,ortools_vrp"
+BL_AB="fifo,greedy,alns,offline_alns"
 BL_C="fifo,greedy,alns,offline_alns"
+$_HAVE_VRP && BL_AB="$BL_AB,ortools_vrp"  # routing VRP — primary RL comparison baseline
 $_HAVE_GRB && BL_AB="$BL_AB,gurobi" && BL_C="$BL_C,gurobi"
 $_HAVE_ORT && BL_AB="$BL_AB,ortools"   # OR-Tools MILP A/B only — too slow at n_req>=25
 BL_D="fifo,greedy,alns,offline_alns"   # exact solvers never tractable at n_req=60
