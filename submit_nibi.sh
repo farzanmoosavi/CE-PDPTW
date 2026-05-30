@@ -36,8 +36,25 @@
 #SBATCH --error=logs/train-%x-%j.err
 
 module purge
-module load python/3.10 scipy-stack cuda/12.2
+module load python/3.10 scipy-stack
 source ~/py310_nibi/bin/activate
+
+# Load the CUDA module that matches the installed torch wheel.
+# torch.version.cuda tells us the CUDA the wheel was compiled against;
+# try that first, then fall back to known-good versions.
+_TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda or '')" 2>/dev/null || echo "")
+_CUDA_LOADED=0
+for _CV in "$_TORCH_CUDA" 13.2 13.1 13.0 12.6 12.2; do
+    [ -z "$_CV" ] && continue
+    if module load cuda/$_CV 2>/dev/null; then
+        echo "[cuda] Loaded cuda/$_CV (torch compiled with CUDA $_TORCH_CUDA)"
+        _CUDA_LOADED=1
+        break
+    fi
+done
+if [ $_CUDA_LOADED -eq 0 ]; then
+    echo "WARNING: could not load any CUDA module — training will run on CPU."
+fi
 
 # MPS removed: each torchrun rank owns a separate physical H100 (3 GPUs, 3 ranks).
 # MPS is for sharing one GPU across multiple processes — not applicable here and
