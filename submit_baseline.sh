@@ -48,51 +48,49 @@ fi
 
 # ── OR-Tools CP-SAT (used by ortools_vrp baseline) ───────────────────────────
 # The ortools_vrp baseline uses CP-SAT (ortools.sat.python.cp_model), NOT pywrapcp.
-# The probe must test CP-SAT in a FRESH subprocess to match how the benchmark runs
-# (spawn isolation).
+# Test CP-SAT in a fresh subprocess (subprocess.run, no pickling) to mirror the
+# exact execution context of the worker.  vrpUpdate.py now lazy-imports torch so
+# the worker subprocess never loads torch alongside OR-Tools (was causing SIGSEGV
+# due to libprotobuf ABI conflict).
 #
-# NOTE: multiprocessing.spawn inside a python -c script cannot pickle functions
-# defined in that script (__main__ has no file path → PicklingError → always fails).
-# Instead we use subprocess.run([sys.executable, '-c', code]) which starts a fresh
-# Python interpreter directly, no pickling needed.
-#
-# NOTE: vrpUpdate.py previously did "import torch" at module level, which loaded
-# torch alongside OR-Tools → libprotobuf ABI conflict → SIGSEGV.  Fixed by making
-# torch a lazy import (inside each function that uses it).  The probe now correctly
-# tests whether CP-SAT itself works in a subprocess.
+# Heredoc inside bash if-then-else requires "then" after the terminator which is
+# error-prone in SLURM scripts; use a temp file instead to avoid syntax issues.
 _HAVE_VRP=false
 echo "Testing OR-Tools CP-SAT in fresh subprocess (used by ortools_vrp baseline)..."
-if python - 2>/dev/null <<'PYEOF'
-import subprocess, sys, textwrap
-probe = textwrap.dedent("""
-    from ortools.sat.python import cp_model
-    model = cp_model.CpModel()
-    arcs = []
-    for n in range(3):
-        for m in range(3):
-            if n != m:
-                v = model.new_bool_var('a_{}_{}'.format(n, m))
-                arcs.append((n, m, v))
-        lp = model.new_bool_var('lp_{}'.format(n))
-        arcs.append((n, n, lp))
-    model.add_circuit(arcs)
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 5
-    status = solver.solve(model)
-    assert status in (cp_model.OPTIMAL, cp_model.FEASIBLE), 'bad status {}'.format(status)
-""")
+_CPSAT_TMP=$(mktemp /tmp/cpsat_probe_XXXXXX.py)
+cat > "$_CPSAT_TMP" << 'PROBE_END'
+import subprocess, sys
+probe_code = (
+    "from ortools.sat.python import cp_model\n"
+    "model = cp_model.CpModel()\n"
+    "arcs = []\n"
+    "for n in range(3):\n"
+    "    for m in range(3):\n"
+    "        if n != m:\n"
+    "            v = model.new_bool_var('a{}_{}'.format(n,m))\n"
+    "            arcs.append((n, m, v))\n"
+    "    lp = model.new_bool_var('lp{}'.format(n))\n"
+    "    arcs.append((n, n, lp))\n"
+    "model.add_circuit(arcs)\n"
+    "solver = cp_model.CpSolver()\n"
+    "solver.parameters.max_time_in_seconds = 5\n"
+    "status = solver.solve(model)\n"
+    "assert status in (cp_model.OPTIMAL, cp_model.FEASIBLE)\n"
+)
 try:
-    result = subprocess.run([sys.executable, '-c', probe], timeout=30)
-    sys.exit(result.returncode)
+    r = subprocess.run([sys.executable, '-c', probe_code], timeout=30)
+    sys.exit(r.returncode)
 except Exception as e:
-    print('probe exception:', e, file=sys.stderr)
+    print('probe error:', e, file=sys.stderr)
     sys.exit(1)
-PYEOF
+PROBE_END
+if timeout 60 python "$_CPSAT_TMP" 2>/dev/null; then
     _HAVE_VRP=true
     echo "OR-Tools CP-SAT (subprocess) OK."
 else
     echo "OR-Tools CP-SAT probe failed — ortools_vrp will be EXCLUDED."
 fi
+rm -f "$_CPSAT_TMP"
 
 # ── Gurobi ───────────────────────────────────────────────────
 # Use the Narval site module — gurobipy must match the module version.
