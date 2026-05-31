@@ -53,6 +53,11 @@ class ExactRollingConfig:
     mip_gap: float = 0.01
     log_to_console: bool = False
     n_threads: int = 0
+    # When True: zero all energy values and remove depot copies, turning the MILP
+    # into a pure PDPTW. Routes are still executed against real battery physics.
+    # Used for the ablation: (gurobi - gurobi_no_battery) = value of battery-joint
+    # planning; (gurobi_no_battery - alns) = exact vs heuristic search quality.
+    disable_battery: bool = False
 
 def _node_name(index: int) -> str:
     return f"n{int(index)}"
@@ -194,6 +199,13 @@ def _build_exact_data_from_residual(
         battery_min = (0.25 if vehicle.normalized_mode() == "uav" else 0.20) * full_battery
         battery_min = min(battery_min, battery_max)
 
+        if config.disable_battery:
+            # Pure PDPTW ablation: infinite battery, no depot visits for recharge.
+            # Routes are still executed against real battery physics so the gap
+            # (gurobi - gurobi_no_battery) measures the value of battery-joint planning.
+            battery_max = 1e12
+            battery_min = 0.0
+
         if config.use_discrete_pickup_speed:
             if vehicle.normalized_mode() == "uav":
                 speeds = np.linspace(module.V_UAV_MIN_PICKUP, module.V_UAV_MAX, config.pickup_speed_grid_size)
@@ -210,7 +222,7 @@ def _build_exact_data_from_residual(
                 capacity=float(vehicle.capacity),
                 battery_max=battery_max,
                 battery_min=battery_min,
-                depot_visit_limit=int(config.depot_visit_limit),
+                depot_visit_limit=0 if config.disable_battery else int(config.depot_visit_limit),
                 speed_levels=speed_keys,
             )
         )
@@ -282,12 +294,15 @@ def _build_exact_data_from_residual(
                     req_payload = float(req.demand) if action in {"pickup", "delivery"} else 0.0
 
                 travel_time[exact_vehicle.id, source_name, target_name] = distance / max(speed, 1e-9)
-                energy[exact_vehicle.id, source_name, target_name] = _edge_energy_kj(
-                    mode=mode,
-                    distance=distance,
-                    payload=req_payload,
-                    wind_vec=_wind_vec(full_instance),
-                    speed=speed,
+                energy[exact_vehicle.id, source_name, target_name] = (
+                    0.0 if config.disable_battery else
+                    _edge_energy_kj(
+                        mode=mode,
+                        distance=distance,
+                        payload=req_payload,
+                        wind_vec=_wind_vec(full_instance),
+                        speed=speed,
+                    )
                 )
 
                 if config.use_discrete_pickup_speed and target_name in node_to_action and node_to_action[target_name][1] == "pickup":
@@ -301,12 +316,15 @@ def _build_exact_data_from_residual(
                         pickup_time_by_speed[exact_vehicle.id, source_name, target_name, speed_key] = (
                             distance / max(float(speed_value), 1e-9)
                         )
-                        pickup_energy_by_speed[exact_vehicle.id, source_name, target_name, speed_key] = _edge_energy_kj(
-                            mode=mode,
-                            distance=distance,
-                            payload=req_payload,
-                            wind_vec=_wind_vec(full_instance),
-                            speed=float(speed_value),
+                        pickup_energy_by_speed[exact_vehicle.id, source_name, target_name, speed_key] = (
+                            0.0 if config.disable_battery else
+                            _edge_energy_kj(
+                                mode=mode,
+                                distance=distance,
+                                payload=req_payload,
+                                wind_vec=_wind_vec(full_instance),
+                                speed=float(speed_value),
+                            )
                         )
 
     data = module.CECPDPTWData(
@@ -646,6 +664,38 @@ def solve_static_instance_with_gurobi_rolling(
         shift_minutes=config.shift_minutes or _infer_shift_minutes(full_instance),
     )
     return dispatcher.run_shift(arrival_stream, fleet, full_instance)
+
+def solve_static_instance_with_gurobi_no_battery_rolling(
+    full_instance: Dict[str, Any],
+    config: ExactRollingConfig,
+) -> List[Dict[str, Any]]:
+    """Gurobi ablation: MILP solved as pure PDPTW (all energy values = 0, no depot copies).
+
+    Routes are executed against real battery physics, so service rate drops where
+    battery is the binding constraint.  The gap vs solve_static_instance_with_gurobi_rolling
+    isolates the value of battery-joint planning; the gap vs ALNS isolates search quality.
+    """
+    no_bat_config = ExactRollingConfig(
+        n_uav=config.n_uav,
+        n_adr=config.n_adr,
+        n_depots_uav=config.n_depots_uav,
+        n_depots_adr=config.n_depots_adr,
+        depot_sharing=config.depot_sharing,
+        depot_visit_limit=config.depot_visit_limit,
+        delta_minutes=config.delta_minutes,
+        shift_minutes=config.shift_minutes,
+        latest_pickup_slack=config.latest_pickup_slack,
+        latest_delivery_slack=config.latest_delivery_slack,
+        use_discrete_pickup_speed=config.use_discrete_pickup_speed,
+        pickup_speed_grid_size=config.pickup_speed_grid_size,
+        time_limit_seconds=config.time_limit_seconds,
+        mip_gap=config.mip_gap,
+        log_to_console=config.log_to_console,
+        n_threads=config.n_threads,
+        disable_battery=True,
+    )
+    return solve_static_instance_with_gurobi_rolling(full_instance, no_bat_config)
+
 
 def solve_static_instance_with_ortools_rolling(
     full_instance: Dict[str, Any],

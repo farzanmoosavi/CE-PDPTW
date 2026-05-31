@@ -24,6 +24,7 @@ from ce_cpdptw_alns import (
 from ce_cpdptw_rolling_baselines import (
     ExactRollingConfig,
     solve_static_instance_with_gurobi_rolling,
+    solve_static_instance_with_gurobi_no_battery_rolling,
     solve_static_instance_with_ortools_rolling,
 )
 import multiprocessing
@@ -585,6 +586,25 @@ def run_one_baseline(
                 n_threads=gurobi_threads,
             )
             episode_log = solve_static_instance_with_gurobi_rolling(full_instance, config)
+
+        elif baseline == "gurobi_no_battery":
+            # Ablation: same MILP as gurobi but energy=0 and no depot copies.
+            # Gap vs gurobi  = value of battery-joint planning (same search quality).
+            # Gap vs alns    = value of exact search vs heuristic (same energy tier: none).
+            config = ExactRollingConfig(
+                n_uav=n_uav,
+                n_adr=n_adr,
+                n_depots_uav=n_depots_uav,
+                n_depots_adr=n_depots_adr,
+                depot_sharing=depot_sharing,
+                delta_minutes=delta_minutes,
+                shift_minutes=shift_minutes,
+                time_limit_seconds=exact_time_limit_seconds,
+                mip_gap=exact_mip_gap,
+                log_to_console=False,
+                n_threads=gurobi_threads,
+            )
+            episode_log = solve_static_instance_with_gurobi_no_battery_rolling(full_instance, config)
 
         elif baseline == "ortools":
             config = ExactRollingConfig(
@@ -1172,6 +1192,7 @@ def _print_paper_table(aggregate: List[Dict[str, Any]], args: argparse.Namespace
 
         _ENERGY_TIER_LATEX = {
             "gurobi": "T1", "ortools": "T1",
+            "gurobi_no_battery": "T1*",
             "alns": "T2", "offline_alns": "T2",
             "ortools_vrp": "T3", "vns": "T3", "offline_vns": "T3",
             "cw": "T4", "offline_cw": "T4",
@@ -1195,52 +1216,71 @@ def _print_paper_table(aggregate: List[Dict[str, Any]], args: argparse.Namespace
     print('=' * len(header))
 
     # ── Energy-tier gap analysis ──────────────────────────────────────────────
-    # Discloses the three energy-awareness tiers used across baselines so
-    # reviewers can correctly interpret gaps between methods.
+    # Discloses energy-awareness tiers across baselines.
+    # gurobi_no_battery enables causal decomposition:
+    #   gurobi - gurobi_no_battery = value of battery-joint planning (same search quality)
+    #   gurobi_no_battery - alns   = value of exact vs heuristic search (no energy in either)
+    #   gurobi - alns              = total gap = search quality + energy planning combined
     _ENERGY_TIER = {
         # T1: battery is a decision variable; recharge stops planned optimally
-        "gurobi":          ("T1", "Battery-joint MILP"),
-        "ortools":         ("T1", "Battery-joint MILP (OR-Tools)"),
+        "gurobi":            ("T1", "Battery-joint MILP"),
+        "ortools":           ("T1", "Battery-joint MILP (OR-Tools)"),
+        # T1*: same MILP search quality but energy=0 (ablation control for battery planning)
+        "gurobi_no_battery": ("T1*", "MILP routing only (no battery, ablation)"),
         # T2: energy evaluated in every search move (ALNS _materialize_ops)
-        "alns":            ("T2", "Energy-aware search"),
-        "offline_alns":    ("T2", "Energy-aware search (offline)"),
+        "alns":              ("T2", "Energy-aware search"),
+        "offline_alns":      ("T2", "Energy-aware search (offline)"),
         # T3: energy-adjusted planning (battery-aware transit / VNS objective) + reactive execution
-        "ortools_vrp":     ("T3", "Energy-adjusted CP-SAT"),
-        "vns":             ("T3", "Energy-adjusted VNS"),
-        "offline_vns":     ("T3", "Energy-adjusted VNS (offline)"),
+        "ortools_vrp":       ("T3", "Energy-adjusted CP-SAT"),
+        "vns":               ("T3", "Energy-adjusted VNS"),
+        "offline_vns":       ("T3", "Energy-adjusted VNS (offline)"),
         # T4: routing ignores battery; recharge injected reactively at execution
-        "cw":              ("T4", "Reactive recharge only"),
-        "offline_cw":      ("T4", "Reactive recharge only (offline)"),
-        "regret":          ("T4", "Reactive recharge only"),
-        "offline_regret":  ("T4", "Reactive recharge only (offline)"),
-        "fifo":            ("T4", "Reactive recharge only"),
-        "greedy":          ("T4", "Reactive recharge only"),
+        "cw":                ("T4", "Reactive recharge only"),
+        "offline_cw":        ("T4", "Reactive recharge only (offline)"),
+        "regret":            ("T4", "Reactive recharge only"),
+        "offline_regret":    ("T4", "Reactive recharge only (offline)"),
+        "fifo":              ("T4", "Reactive recharge only"),
+        "greedy":            ("T4", "Reactive recharge only"),
     }
     tier_rows: Dict[str, List[float]] = {}
+    sr_by_baseline: Dict[str, float] = {}
     for row in aggregate:
         bl = str(row.get('baseline', ''))
         tier_id, _ = _ENERGY_TIER.get(bl, ("T?", "unknown"))
         sr = float(row.get('delivered_rate_mean') or 0) * 100.0
         tier_rows.setdefault(tier_id, []).append(sr)
+        sr_by_baseline[bl] = sr
 
     if tier_rows:
         print('\n  Energy-awareness tier summary (avg service rate across baselines in tier):')
-        print('  ' + '-' * 48)
+        print('  ' + '-' * 56)
         tier_descriptions = {
-            "T1": "Battery-joint optimization (Gurobi/MILP)",
-            "T2": "Energy-aware search (ALNS)",
-            "T3": "Energy-adjusted planning + reactive exec (CP-SAT/VNS)",
-            "T4": "Reactive recharge only (CW/Regret/FIFO/Greedy)",
+            "T1":  "Battery-joint optimization (Gurobi/MILP)",
+            "T1*": "MILP routing only, no battery (ablation control)",
+            "T2":  "Energy-aware search (ALNS)",
+            "T3":  "Energy-adjusted planning + reactive exec (CP-SAT/VNS)",
+            "T4":  "Reactive recharge only (CW/Regret/FIFO/Greedy)",
         }
         for tier_id in sorted(tier_rows):
             srs = tier_rows[tier_id]
             avg = sum(srs) / len(srs)
             desc = tier_descriptions.get(tier_id, tier_id)
-            print(f'  {tier_id}: {avg:5.1f}% avg service  [{desc}]')
-        print('  ' + '-' * 48)
-        print('  Interpretation: T1 vs T2 gap = value of energy-joint optimization;')
-        print('                  T2 vs T3 gap = value of energy-aware search vs adjusted planning;')
-        print('                  T3 vs T4 gap = value of energy-adjusted planning vs reactive only.')
+            print(f'  {tier_id:4s}: {avg:5.1f}% avg service  [{desc}]')
+        print('  ' + '-' * 56)
+
+        # Causal decomposition (only printed when both gurobi baselines are present)
+        g1  = sr_by_baseline.get("gurobi")
+        g1s = sr_by_baseline.get("gurobi_no_battery")
+        g2  = sr_by_baseline.get("alns")
+        if g1 is not None and g1s is not None and g2 is not None:
+            battery_planning_gap = g1 - g1s
+            search_quality_gap   = g1s - g2
+            total_gap            = g1 - g2
+            print(f'\n  Causal decomposition (gurobi={g1:.1f}%, gurobi_no_battery={g1s:.1f}%, alns={g2:.1f}%):')
+            print(f'    battery-joint planning value : {battery_planning_gap:+.1f}pp  (gurobi - gurobi_no_battery)')
+            print(f'    exact vs heuristic search    : {search_quality_gap:+.1f}pp  (gurobi_no_battery - alns)')
+            print(f'    total Gurobi vs ALNS gap     : {total_gap:+.1f}pp  (sum of above)')
+        print('  ' + '-' * 56)
 
     scenario_label = getattr(args, 'scenario_label', '') or 'baseline'
     latex_path = Path(args.output_dir) / f'paper_table_{scenario_label}.tex'
