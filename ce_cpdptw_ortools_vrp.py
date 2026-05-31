@@ -30,34 +30,8 @@ from ce_cpdptw_alns import (
 )
 from ce_cpdptw_rolling_baselines import _make_forced_delivery_or_depot_route
 
-# Integer time scale: 1 OR-Tools unit = 1/TIME_SCALE minutes
 _TIME_SCALE = 100
 _BIG_M_INT = int(1e8)
-
-
-def _travel_int(
-    from_phys: int,
-    to_phys: int,
-    mode: str,
-    n_depots: int,
-    dm_uav: np.ndarray,
-    dm_adr: np.ndarray,
-) -> int:
-    if from_phys == to_phys:
-        return 0
-    dm = dm_uav if mode == "uav" else dm_adr
-    n_phys = dm.shape[0]
-    if from_phys < 0 or to_phys < 0 or from_phys >= n_phys or to_phys >= n_phys:
-        return _BIG_M_INT
-    dist = float(dm[from_phys, to_phys])
-    if not math.isfinite(dist) or dist >= 1e9:
-        return _BIG_M_INT
-    to_is_depot = to_phys < n_depots
-    from_is_customer = from_phys >= n_depots
-    speed = _depot_speed(mode) if (to_is_depot and from_is_customer) else _cruise_speed(mode)
-    travel_min = dist / max(speed, 1e-9)
-    svc = _service_time(mode) if not to_is_depot else 0.0
-    return int((travel_min + svc) * _TIME_SCALE)
 
 
 def _needs_recharge(
@@ -88,14 +62,17 @@ def _needs_recharge(
     return float(vehicle_state.battery) - energy_needed < _battery_threshold(vehicle_state)
 
 
-class ORToolsVRPRollingHorizonSolver:
+class CPSATVRPRollingHorizonSolver:
     """
-    Rolling-horizon solver using OR-Tools pywrapcp.RoutingModel (VRP routing API,
-    not MILP/SCIP). Each re-plan runs in ~5-10 seconds using GLS metaheuristic.
+    Rolling-horizon VRP solver using OR-Tools CP-SAT (ortools.sat.python.cp_model).
 
-    Heterogeneous fleet: UAV and ADR vehicles get separate per-vehicle transit
-    callbacks via AddDimensionWithVehicleTransits so travel times match their
-    respective speeds.
+    Replaces the pywrapcp RoutingModel which segfaults on CC cluster due to its
+    C++ thread pool calling Python transit callbacks without holding the GIL.
+    CP-SAT uses a SAT/LP backend with no Python callbacks — purely C++ internally.
+
+    Model: one add_circuit per vehicle over optional pickup/delivery nodes.
+    Self-loop literals handle unassigned nodes.  Time propagation via
+    only_enforce_if conditional constraints.  Objective: minimize total transit.
     """
 
     def __init__(
@@ -109,7 +86,7 @@ class ORToolsVRPRollingHorizonSolver:
         self.latest_delivery_slack = latest_delivery_slack
 
     def solve(self, residual: Dict[str, Any]) -> Dict[int, List[Leg]]:
-        from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+        from ortools.sat.python import cp_model
 
         vehicles: Dict[int, Vehicle] = residual["vehicles"]
         active_requests: Dict[int, Request] = residual["active_requests"]
@@ -132,243 +109,189 @@ class ORToolsVRPRollingHorizonSolver:
         ]
 
         if not waiting_requests or not available_vehicle_ids:
-                return routes
+            return routes
 
-        n_vehicles = len(available_vehicle_ids)
-        n_requests = len(waiting_requests)
+        n_veh = len(available_vehicle_ids)
+        n_req = len(waiting_requests)
         n_depots = int(full_instance["n_depots"])
-
-        # OR-Tools node layout:
-        #   0                                  : dummy end depot
-        #   [1 .. n_vehicles]                  : vehicle start positions
-        #   [n_vehicles+1 .. n_vehicles+n_req] : pickup nodes
-        #   [n_vehicles+n_req+1 .. +2*n_req]   : delivery nodes
-        DUMMY_END = 0
-        veh_off = 1
-        pick_off = 1 + n_vehicles
-        dliv_off = 1 + n_vehicles + n_requests
-        n_nodes = 1 + n_vehicles + 2 * n_requests
 
         veh_list = [vehicles[vid] for vid in available_vehicle_ids]
         req_list = list(waiting_requests)
 
-        # Physical grid node for each OR-Tools node
-        phys: List[int] = [0] * n_nodes
-        phys[DUMMY_END] = 0  # depot 0 as dummy return
-        for i, v in enumerate(veh_list):
-            phys[veh_off + i] = int(v.current_node)
-        for i, r in enumerate(req_list):
-            phys[pick_off + i] = int(r.pickup_node)
-            phys[dliv_off + i] = int(r.delivery_node)
+        # CP-SAT node layout (per-vehicle circuit):
+        #   PICK(i)  = 2*i          — pickup of request i
+        #   DLIV(i)  = 2*i + 1      — delivery of request i
+        #   DEPOT(k) = 2*n_req + k  — start/end depot for vehicle k
+        # Total nodes N = 2*n_req + n_veh
+        N = 2 * n_req + n_veh
 
-        dm_uav = _get_distance_matrix(full_instance, "uav")
-        dm_adr = _get_distance_matrix(full_instance, "adr")
+        def PICK(i: int) -> int: return 2 * i
+        def DLIV(i: int) -> int: return 2 * i + 1
+        def DEPOT(k: int) -> int: return 2 * n_req + k
 
-        starts = list(range(veh_off, veh_off + n_vehicles))
-        ends = [DUMMY_END] * n_vehicles
+        # Physical grid node for each CP-SAT node
+        phys: List[int] = [0] * N
+        for i, req in enumerate(req_list):
+            phys[PICK(i)] = req.pickup_node
+            phys[DLIV(i)] = req.delivery_node
+        for k, veh in enumerate(veh_list):
+            phys[DEPOT(k)] = int(veh.current_node)
 
-        manager = pywrapcp.RoutingIndexManager(n_nodes, n_vehicles, starts, ends)
-        routing = pywrapcp.RoutingModel(manager)
+        # Transit times (scaled integers, precomputed — no C++ calls inside solver)
+        TSCALE = 100
+        HORIZON = int(1000 * TSCALE)
+        dm_uav = _get_distance_matrix(full_instance, "uav").tolist()
+        dm_adr = _get_distance_matrix(full_instance, "adr").tolist()
 
-        # Precompute everything into pure Python lists before registering callbacks.
-        # Calling manager.IndexToNode() or numpy array access from inside a callback
-        # causes SIGSEGV on CC because OR-Tools calls Python callbacks from its
-        # internal C++ thread pool — the C++→Python→C++ boundary crossing is unsafe.
-        # Solution: build index→phys and full cost matrices as Python int lists here,
-        # so callbacks only do O(1) list lookups with no C++ or numpy calls.
-
-        # OR-Tools internal index → physical grid node
-        idx_to_phys: List[int] = [0] * n_nodes
-        for node in range(n_nodes):
-            ort_idx = manager.NodeToIndex(node)
-            if 0 <= ort_idx < n_nodes:
-                idx_to_phys[ort_idx] = phys[node]
-
-        # Convert distance matrices to Python float lists once
-        dm_uav_list: List[List[float]] = dm_uav.tolist()
-        dm_adr_list: List[List[float]] = dm_adr.tolist()
-        n_phys_uav = len(dm_uav_list)
-        n_phys_adr = len(dm_adr_list)
-
-        def _travel_pure(fp: int, tp: int, mode: str) -> int:
+        def _trav(fp: int, tp: int, mode: str) -> int:
             if fp == tp:
                 return 0
-            dm = dm_uav_list if mode == "uav" else dm_adr_list
-            n_p = n_phys_uav if mode == "uav" else n_phys_adr
+            dm = dm_uav if mode == "uav" else dm_adr
+            n_p = len(dm)
             if fp < 0 or tp < 0 or fp >= n_p or tp >= n_p:
-                return _BIG_M_INT
-            dist = dm[fp][tp]
-            if not math.isfinite(dist) or dist >= 1e9:
-                return _BIG_M_INT
-            to_is_depot = tp < n_depots
-            from_is_customer = fp >= n_depots
-            speed = _depot_speed(mode) if (to_is_depot and from_is_customer) else _cruise_speed(mode)
-            travel_min = dist / max(speed, 1e-9)
-            svc = _service_time(mode) if not to_is_depot else 0.0
-            return int((travel_min + svc) * _TIME_SCALE)
+                return HORIZON
+            d = float(dm[fp][tp])
+            if not math.isfinite(d) or d >= 1e9:
+                return HORIZON
+            to_dep = tp < n_depots
+            from_cust = fp >= n_depots
+            spd = _depot_speed(mode) if (to_dep and from_cust) else _cruise_speed(mode)
+            tm = d / max(spd, 1e-9)
+            svc = _service_time(mode) if not to_dep else 0.0
+            return int((tm + svc) * TSCALE)
 
-        # Precompute cost matrices keyed by OR-Tools index pairs (pure Python ints)
-        cost_uav: List[List[int]] = [
-            [_travel_pure(idx_to_phys[i], idx_to_phys[j], "uav") for j in range(n_nodes)]
-            for i in range(n_nodes)
-        ]
-        cost_adr: List[List[int]] = [
-            [_travel_pure(idx_to_phys[i], idx_to_phys[j], "adr") for j in range(n_nodes)]
-            for i in range(n_nodes)
-        ]
-
-        # Demand vector keyed by OR-Tools index (pure Python ints)
-        demand_by_idx: List[int] = [0] * n_nodes
-        for node in range(n_nodes):
-            ort_idx = manager.NodeToIndex(node)
-            if node >= pick_off and node < dliv_off:
-                req_i = node - pick_off
-                demand_by_idx[ort_idx] = int(round(req_list[req_i].demand * 100))
-            elif node >= dliv_off:
-                req_i = node - dliv_off
-                demand_by_idx[ort_idx] = -int(round(req_list[req_i].demand * 100))
-
-        # Callbacks: pure list lookups, zero C++/numpy calls inside.
-        # Register exactly 2 transit callbacks (one per mode) shared across all vehicles.
-        # Registering n_vehicles separate closures triggers a CC cluster-specific segfault
-        # when GLS calls Python callbacks from its C++ thread pool.
-        _cb_refs: List = []
         modes = [v.normalized_mode() for v in veh_list]
 
-        # Bounds-checked callbacks: OR-Tools 9.x may call with indices outside
-        # [0, n_nodes) for internal start/end slots.  An uncaught IndexError from
-        # a Python callback propagates as SIGSEGV through OR-Tools C++.
-        _n_cb = len(cost_uav)
+        # tran[k][n][m] = integer travel time for vehicle k from CP node n to m
+        tran: List[List[List[int]]] = [
+            [[_trav(phys[n], phys[m], modes[k]) for m in range(N)] for n in range(N)]
+            for k in range(n_veh)
+        ]
 
-        def _make_cost_cb(cost_mat: List[List[int]]):
-            _n = len(cost_mat)
-            def cb(fi: int, ti: int) -> int:
-                if fi < 0 or ti < 0 or fi >= _n or ti >= _n:
-                    return _BIG_M_INT
-                return cost_mat[fi][ti]
-            return cb
-
-        uav_cb = _make_cost_cb(cost_uav)
-        adr_cb = _make_cost_cb(cost_adr)
-        _cb_refs.extend([uav_cb, adr_cb])
-        uav_cb_idx = routing.RegisterTransitCallback(uav_cb)
-        adr_cb_idx = routing.RegisterTransitCallback(adr_cb)
-
-        transit_indices: List[int] = []
-        for v_i, mode in enumerate(modes):
-            cb_idx = uav_cb_idx if mode == "uav" else adr_cb_idx
-            transit_indices.append(cb_idx)
-            routing.SetArcCostEvaluatorOfVehicle(cb_idx, v_i)
-
-        print(f"[ortools_vrp] step1: callbacks registered ({n_vehicles}v {n_requests}r)", flush=True)
-
-        # Time dimension with per-vehicle transit
-        HORIZON_INT = int(1000 * _TIME_SCALE)
-        SLACK_INT = int(60 * _TIME_SCALE)
-        routing.AddDimensionWithVehicleTransits(
-            transit_indices,
-            SLACK_INT,
-            HORIZON_INT,
-            False,
-            "Time",
-        )
-        time_dim = routing.GetDimensionOrDie("Time")
-        print("[ortools_vrp] step2: time dimension added", flush=True)
-
-        # Capacity dimension
-        _n_dem = len(demand_by_idx)
-        def demand_cb(idx: int) -> int:
-            if idx < 0 or idx >= _n_dem:
-                return 0
-            return demand_by_idx[idx]
-
-        _cb_refs.append(demand_cb)
-        demand_cb_idx = routing.RegisterUnaryTransitCallback(demand_cb)
-        routing.AddDimensionWithVehicleCapacity(
-            demand_cb_idx,
-            0,
-            [int(round(v.capacity * 100)) for v in veh_list],
-            True,
-            "Capacity",
-        )
-        print("[ortools_vrp] step3: capacity dimension added", flush=True)
-
-        # Pickup-delivery pairs with same-vehicle and precedence constraints
-        solver = routing.solver()
+        # Time windows (scaled integers, relative to current_time)
+        tw_lo: List[int] = [0] * N
+        tw_hi: List[int] = [HORIZON] * N
         for i, req in enumerate(req_list):
-            pick_idx = manager.NodeToIndex(pick_off + i)
-            dliv_idx = manager.NodeToIndex(dliv_off + i)
-            routing.AddPickupAndDelivery(pick_idx, dliv_idx)
-            solver.Add(routing.VehicleVar(pick_idx) == routing.VehicleVar(dliv_idx))
-            solver.Add(time_dim.CumulVar(pick_idx) <= time_dim.CumulVar(dliv_idx))
+            ep = max(0.0, req.t_arrival - current_time)
+            lp = max(req.t_pickup - current_time + self.latest_pickup_slack, ep + 1.0)
+            ld = max(req.t_delivery - current_time + self.latest_delivery_slack, 0.0)
+            tw_lo[PICK(i)] = int(ep * TSCALE)
+            tw_hi[PICK(i)] = int(lp * TSCALE)
+            tw_hi[DLIV(i)] = int(ld * TSCALE)
 
-            # Time windows (relative to current_time)
-            earliest_pick = max(0.0, req.t_arrival - current_time)
-            latest_pick = max(
-                req.t_pickup - current_time + self.latest_pickup_slack,
-                earliest_pick + 1.0,
-            )
-            latest_dliv = max(req.t_delivery - current_time + self.latest_delivery_slack, 0.0)
+        # ── Build CP-SAT model ──────────────────────────────────────────────
+        model = cp_model.CpModel()
 
-            time_dim.CumulVar(pick_idx).SetRange(
-                int(earliest_pick * _TIME_SCALE),
-                int(latest_pick * _TIME_SCALE),
-            )
-            time_dim.CumulVar(dliv_idx).SetRange(0, int(latest_dliv * _TIME_SCALE))
+        # Self-loop literals: loop[k][n] is True when vehicle k does NOT visit node n.
+        # Used in add_circuit as the self-loop arc literal.
+        loop = [
+            [model.new_bool_var(f'lp_{k}_{n}') for n in range(N)]
+            for k in range(n_veh)
+        ]
 
-        # Vehicle start/end time windows
-        for v_i in range(n_vehicles):
-            time_dim.CumulVar(routing.Start(v_i)).SetRange(0, 0)
-            time_dim.CumulVar(routing.End(v_i)).SetRange(0, HORIZON_INT)
+        # Each vehicle must pass through its own depot; cannot visit other depots.
+        for k in range(n_veh):
+            model.add(loop[k][DEPOT(k)] == 0)
+            for k2 in range(n_veh):
+                if k2 != k:
+                    model.add(loop[k][DEPOT(k2)] == 1)
 
-        print("[ortools_vrp] step4: constraints set, calling Solve", flush=True)
+        # Each request served by exactly one vehicle; pickup and delivery same vehicle.
+        for i in range(n_req):
+            model.add_exactly_one([loop[k][PICK(i)].negated() for k in range(n_veh)])
+            for k in range(n_veh):
+                # pickup visited ↔ delivery visited (same vehicle constraint)
+                model.add(loop[k][PICK(i)] == loop[k][DLIV(i)])
 
-        # Search parameters.
-        # GREEDY_DESCENT avoids the C++ thread pool used by GUIDED_LOCAL_SEARCH;
-        # GLS calls Python callbacks from non-GIL threads, causing SIGSEGV on CC.
-        params = pywrapcp.DefaultRoutingSearchParameters()
-        params.first_solution_strategy = (
-            routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION
-        )
-        params.local_search_metaheuristic = (
-            routing_enums_pb2.LocalSearchMetaheuristic.GREEDY_DESCENT
-        )
-        params.time_limit.seconds = int(self.time_limit_seconds)
-        params.log_search = False
+        # Arc variables: arc[k][(n,m)] is True when vehicle k travels directly n→m.
+        arc: List[Dict[Tuple[int, int], Any]] = [
+            {(n, m): model.new_bool_var(f'a_{k}_{n}_{m}')
+             for n in range(N) for m in range(N) if n != m}
+            for k in range(n_veh)
+        ]
 
-        solution = routing.SolveWithParameters(params)
-        print(f"[ortools_vrp] step5: solve done, solution={'found' if solution else 'None'}", flush=True)
-        if solution is None:
+        # Circuit constraint: each vehicle's arcs + self-loops form a valid circuit.
+        for k in range(n_veh):
+            circuit_arcs = [(n, n, loop[k][n]) for n in range(N)]
+            circuit_arcs += [(n, m, arc[k][(n, m)]) for (n, m) in arc[k]]
+            model.add_circuit(circuit_arcs)
+
+        # Time variables: t[k][n] = arrival time of vehicle k at CP node n.
+        t = [
+            [model.new_int_var(0, HORIZON, f't_{k}_{n}') for n in range(N)]
+            for k in range(n_veh)
+        ]
+
+        # Vehicle departs its own depot at time 0.
+        for k in range(n_veh):
+            model.add(t[k][DEPOT(k)] == 0)
+
+        # Time propagation: if arc k n→m is used, t[k][m] ≥ t[k][n] + transit.
+        for k in range(n_veh):
+            for (n, m), a_var in arc[k].items():
+                tr = tran[k][n][m]
+                if tr > 0:
+                    model.add(t[k][m] >= t[k][n] + tr).only_enforce_if(a_var)
+
+        # Time windows and precedence (only enforced when node is visited).
+        for i in range(n_req):
+            for k in range(n_veh):
+                visits = loop[k][PICK(i)].negated()
+                model.add(t[k][PICK(i)] >= tw_lo[PICK(i)]).only_enforce_if(visits)
+                model.add(t[k][PICK(i)] <= tw_hi[PICK(i)]).only_enforce_if(visits)
+                model.add(t[k][DLIV(i)] <= tw_hi[DLIV(i)]).only_enforce_if(visits)
+                model.add(t[k][DLIV(i)] >= t[k][PICK(i)]).only_enforce_if(visits)
+
+        # Objective: minimize total transit time (proxy for routing cost).
+        arc_vars: List[Any] = []
+        coeffs: List[int] = []
+        for k in range(n_veh):
+            for (n, m), a_var in arc[k].items():
+                c = tran[k][n][m]
+                if 0 < c < HORIZON:
+                    arc_vars.append(a_var)
+                    coeffs.append(c)
+        if arc_vars:
+            model.minimize(cp_model.LinearExpr.weighted_sum(arc_vars, coeffs))
+
+        # Solve
+        cp_solver = cp_model.CpSolver()
+        cp_solver.parameters.max_time_in_seconds = self.time_limit_seconds
+        cp_solver.parameters.log_search_progress = False
+        status = cp_solver.solve(model)
+
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             return routes
 
-        # Materialise routes as Leg objects via _simulate_leg
-        for v_i, vid in enumerate(available_vehicle_ids):
+        # ── Materialise routes as Leg objects ───────────────────────────────
+        for k, vid in enumerate(available_vehicle_ids):
             veh_state = copy.deepcopy(vehicles[vid])
             if veh_state.battery_init is None:
                 veh_state.battery_init = float(veh_state.battery)
 
+            # Follow arc chain from DEPOT(k) until returning to DEPOT(k).
+            cur = DEPOT(k)
+            visit_order: List[int] = []
+            for _ in range(N + 1):
+                nxt = None
+                for m in range(N):
+                    if m != cur and (cur, m) in arc[k] and cp_solver.boolean_value(arc[k][(cur, m)]):
+                        nxt = m
+                        break
+                if nxt is None or nxt == DEPOT(k):
+                    break
+                visit_order.append(nxt)
+                cur = nxt
+
             legs: List[Leg] = []
-            index = routing.Start(v_i)
-
-            while not routing.IsEnd(index):
-                next_idx = solution.Value(routing.NextVar(index))
-                if routing.IsEnd(next_idx):
-                    break
-                node = manager.IndexToNode(next_idx)
-                if node == DUMMY_END:
-                    break
-
-                if pick_off <= node < dliv_off:
-                    req = req_list[node - pick_off]
-                    leg_type = "pickup"
-                    to_node = req.pickup_node
-                elif dliv_off <= node < n_nodes:
-                    req = req_list[node - dliv_off]
-                    leg_type = "delivery"
-                    to_node = req.delivery_node
-                else:
-                    index = next_idx
-                    continue
+            for cp_node in visit_order:
+                if cp_node >= 2 * n_req:
+                    continue  # other vehicle's depot node — skip
+                i = cp_node // 2
+                is_pickup = (cp_node % 2 == 0)
+                req = req_list[i]
+                leg_type = "pickup" if is_pickup else "delivery"
+                to_node = req.pickup_node if is_pickup else req.delivery_node
 
                 if _needs_recharge(veh_state, to_node, leg_type, req, full_instance):
                     depot = _nearest_feasible_depot(veh_state.current_node, veh_state, full_instance)
@@ -382,8 +305,6 @@ class ORToolsVRPRollingHorizonSolver:
                     legs.append(leg)
                 else:
                     break
-
-                index = next_idx
 
             routes[vid] = legs
 
@@ -420,7 +341,7 @@ def solve_static_instance_with_ortools_vrp_rolling(
         tw = _to_numpy(full_instance["time_window"]).reshape(-1).astype(float)
         shift_minutes = float(np.nanmax(tw) + 120.0)
 
-    solver = ORToolsVRPRollingHorizonSolver(
+    solver = CPSATVRPRollingHorizonSolver(
         time_limit_seconds=time_limit_seconds,
         latest_pickup_slack=latest_pickup_slack,
         latest_delivery_slack=latest_delivery_slack,
