@@ -189,12 +189,21 @@ class CPSATVRPRollingHorizonSolver:
             for k in range(n_veh)
         ]
 
-        # Each vehicle must pass through its own depot; cannot visit other depots.
+        # Each vehicle cannot visit other vehicles' depots.
+        # Its own depot is conditionally forced into the circuit:
+        #   loop[k][DEPOT(k)] <= loop[k][PICK(i)]  for all i
+        # → depot self-loop is forbidden whenever any pickup is visited (forces depot
+        #   into the circuit as start/end).
+        # → depot CAN self-loop when NO requests are served (all pickups skipped),
+        #   keeping add_circuit feasible when every request is time-window-infeasible.
+        # Unconditionally forcing loop[k][DEPOT(k)]==0 caused INFEASIBLE whenever all
+        # requests were skipped — same symptom as the old add_exactly_one bug.
         for k in range(n_veh):
-            model.add(loop[k][DEPOT(k)] == 0)
             for k2 in range(n_veh):
                 if k2 != k:
                     model.add(loop[k][DEPOT(k2)] == 1)
+            for i in range(n_req):
+                model.add(loop[k][DEPOT(k)] <= loop[k][PICK(i)])
 
         # Each request served by at most one vehicle; pickup and delivery same vehicle.
         # at_most_one (not exactly_one) so that infeasible requests don't make the
