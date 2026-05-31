@@ -26,7 +26,8 @@ from ce_cpdptw_rolling_baselines import (
     solve_static_instance_with_gurobi_rolling,
     solve_static_instance_with_ortools_rolling,
 )
-from ce_cpdptw_ortools_vrp import solve_static_instance_with_ortools_vrp_rolling
+import multiprocessing
+import pickle
 
 SUMMARY_KEYS = [
     "baseline",
@@ -422,6 +423,42 @@ def run_one_rl_baseline(
         wall_time = time.perf_counter() - start
         return failed_row('rl', instance_id, exc, wall_time)
 
+def _ortools_vrp_worker(result_queue: multiprocessing.Queue, payload: bytes) -> None:
+    try:
+        kwargs = pickle.loads(payload)
+        from ce_cpdptw_ortools_vrp import solve_static_instance_with_ortools_vrp_rolling
+        result = solve_static_instance_with_ortools_vrp_rolling(**kwargs)
+        result_queue.put(pickle.dumps(('ok', result)))
+    except Exception as exc:
+        result_queue.put(pickle.dumps(('err', str(exc))))
+
+
+def _ortools_vrp_isolated(full_instance: Dict[str, Any], **kwargs) -> List[Dict[str, Any]]:
+    """Run the OR-Tools VRP solver in a fresh spawn subprocess.
+
+    A spawn process starts without torch loaded, avoiding the libpyg.so ABI
+    conflict that causes SIGSEGV on CC clusters.  If the subprocess crashes
+    or times out it raises RuntimeError so the benchmark records a failure.
+    """
+    timeout = float(kwargs.get("time_limit_seconds", 10.0)) * 3 + 60
+    payload = pickle.dumps({"full_instance": full_instance, **kwargs})
+    ctx = multiprocessing.get_context("spawn")
+    q: multiprocessing.Queue = ctx.Queue()
+    p = ctx.Process(target=_ortools_vrp_worker, args=(q, payload))
+    p.start()
+    p.join(timeout=timeout)
+    if p.is_alive():
+        p.terminate()
+        p.join()
+        raise RuntimeError("ortools_vrp subprocess timed out")
+    if p.exitcode != 0:
+        raise RuntimeError(f"ortools_vrp subprocess crashed (exit {p.exitcode})")
+    status, result = pickle.loads(q.get_nowait())
+    if status != "ok":
+        raise RuntimeError(f"ortools_vrp error: {result}")
+    return result
+
+
 def run_one_baseline(
     *,
     baseline: str,
@@ -538,7 +575,10 @@ def run_one_baseline(
             )
 
         elif baseline == "ortools_vrp":
-            episode_log = solve_static_instance_with_ortools_vrp_rolling(
+            # Run in an isolated spawn subprocess so a C-level segfault in
+            # the OR-Tools routing engine (ABI conflict with torch/libpyg.so
+            # on CC clusters) cannot kill the benchmark process.
+            episode_log = _ortools_vrp_isolated(
                 full_instance,
                 n_uav=n_uav,
                 n_adr=n_adr,
