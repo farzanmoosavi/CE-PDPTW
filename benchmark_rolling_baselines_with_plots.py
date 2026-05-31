@@ -599,6 +599,34 @@ def run_one_baseline(
                 time_limit_seconds=min(exact_time_limit_seconds, 10.0),
             )
 
+        elif baseline in ("cw", "offline_cw", "regret", "offline_regret", "vns", "offline_vns"):
+            from ce_cpdptw_vrp_heuristics import (
+                solve_static_instance_with_cw_rolling,
+                solve_static_instance_with_cw_offline,
+                solve_static_instance_with_regret_rolling,
+                solve_static_instance_with_regret_offline,
+                solve_static_instance_with_vns_rolling,
+                solve_static_instance_with_vns_offline,
+            )
+            _heuristic_fn = {
+                "cw":             solve_static_instance_with_cw_rolling,
+                "offline_cw":     solve_static_instance_with_cw_offline,
+                "regret":         solve_static_instance_with_regret_rolling,
+                "offline_regret": solve_static_instance_with_regret_offline,
+                "vns":            solve_static_instance_with_vns_rolling,
+                "offline_vns":    solve_static_instance_with_vns_offline,
+            }[baseline]
+            episode_log = _heuristic_fn(
+                full_instance,
+                n_uav=n_uav,
+                n_adr=n_adr,
+                n_depots_uav=n_depots_uav,
+                n_depots_adr=n_depots_adr,
+                depot_sharing=depot_sharing,
+                delta_minutes=delta_minutes,
+                shift_minutes=shift_minutes,
+            )
+
         else:
             raise ValueError(f"Unknown baseline: {baseline}")
 
@@ -807,7 +835,10 @@ def _worker_run_instance(task: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
     baselines = [item.strip().lower() for item in args.baselines.split(",") if item.strip()]
-    valid = {"alns", "offline_alns", "fifo", "greedy", "gurobi", "ortools", "ortools_vrp", "rl"}
+    valid = {
+        "alns", "offline_alns", "fifo", "greedy", "gurobi", "ortools", "ortools_vrp", "rl",
+        "cw", "offline_cw", "regret", "offline_regret", "vns", "offline_vns",
+    }
     invalid = [baseline for baseline in baselines if baseline not in valid]
     if invalid:
         raise ValueError(f"Unknown baselines: {invalid}")
