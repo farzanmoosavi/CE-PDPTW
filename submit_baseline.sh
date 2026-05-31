@@ -97,26 +97,16 @@ fi
 module load gurobi/12.0.0
 pip install gurobipy==12.0.0 --no-index
 
-# ── Gurobi license (academic named-user) ────────────────────
-# Point to the local .lic file in the project directory so Gurobi
-# validates offline — no CC token server needed.
-# Resolve project directory early so the license path is correct.
+# Resolve project directory (used below and for cd).
 _PROJ="$HOME/projects/def-bfarooq/farzan97/CE-PDPTW"
 [ -d "$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW" ] && _PROJ="$HOME/links/projects/def-bfarooq/farzan97/CE-PDPTW"
 
-_GUROBI_LIC="$_PROJ/gurobi.lic"
-if [ -f "$_GUROBI_LIC" ]; then
-    export GRB_LICENSE_FILE="$_GUROBI_LIC"
-    echo "Using Gurobi license: $GRB_LICENSE_FILE"
-else
-    echo "WARNING: gurobi.lic not found at $_GUROBI_LIC — Gurobi may fall back to token server."
-fi
-
 # ── Gurobi license pre-flight check ─────────────────────────
-# Named-user license validates locally (no network); 30s is generous.
-echo "Testing Gurobi license (30s timeout)..."
+# Use CC token server configured by module load gurobi/12.0.0.
+# First checkout can take 60-90s; use 120s timeout.
+echo "Testing Gurobi license via CC token server (120s timeout)..."
 _HAVE_GRB=false
-if timeout 30 python -c "
+if timeout 120 python -c "
 import gurobipy as gp
 gp.setParam('OutputFlag', 0)
 m = gp.Model()
@@ -125,8 +115,8 @@ m.dispose()
     _HAVE_GRB=true
     echo "Gurobi license OK."
 else
-    echo "WARNING: Gurobi license check failed — Gurobi will be EXCLUDED from baselines."
-    echo "  Check that gurobi.lic is valid and GRB_LICENSE_FILE is set correctly."
+    echo "WARNING: Gurobi license check failed (token server unreachable or timed out)."
+    echo "  Gurobi will be EXCLUDED from baselines for this run."
 fi
 
 # Build per-rung baselines strings based on what's available.
