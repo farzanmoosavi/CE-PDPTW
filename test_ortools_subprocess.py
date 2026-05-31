@@ -253,6 +253,125 @@ def test_cw_chaining():
         return False
 
 
+# ── Test 5: add_at_most_one allows partial service (infeasible requests skipped) ─
+
+def _cpsat_optional_worker(q):
+    """Worker: CP-SAT model with add_at_most_one + serve penalty returns FEASIBLE even when
+    one request is unreachable within its time window (simulating a no-fly-zone request).
+
+    Layout: 1 vehicle, 2 requests.
+    Nodes: PICK(0)=0, DLIV(0)=1, PICK(1)=2, DLIV(1)=3, DEPOT(0)=4
+    Transit: req0 costs 1 (feasible within tw_hi=100), req1 costs HORIZON (HORIZON >> tw_hi=10).
+    Time window on PICK(1) = [0, 10] — transit HORIZON violates it when visited.
+    With add_exactly_one, the model is INFEASIBLE (forced visit violates time window).
+    With add_at_most_one + SERVE_PENALTY, the model is FEASIBLE (solver skips req1).
+    """
+    try:
+        from ortools.sat.python import cp_model
+        HORIZON = 100000
+        SERVE_PENALTY = 10 * HORIZON
+
+        model = cp_model.CpModel()
+        n_veh, n_req = 1, 2
+        N = 2 * n_req + n_veh  # PICK(0)=0, DLIV(0)=1, PICK(1)=2, DLIV(1)=3, DEPOT(0)=4
+
+        loop = [[model.new_bool_var(f'lp_{k}_{n}') for n in range(N)] for k in range(n_veh)]
+        model.add(loop[0][4] == 0)  # vehicle must use its depot
+
+        # Transit costs: req0 arcs cost 1, req1 arcs cost HORIZON (no-fly zone).
+        tran = [
+            [0, 1, HORIZON, HORIZON, 0],  # from PICK(0)
+            [1, 0, HORIZON, HORIZON, 0],  # from DLIV(0)
+            [HORIZON]*5,                   # from PICK(1) — all blocked
+            [HORIZON]*5,                   # from DLIV(1) — all blocked
+            [1, 1, HORIZON, HORIZON, 0],  # from DEPOT(0)
+        ]
+
+        model.add_at_most_one([loop[0][0].negated()])   # req 0: at most 1 vehicle
+        model.add_at_most_one([loop[0][2].negated()])   # req 1: at most 1 vehicle
+        for i in range(n_req):
+            model.add(loop[0][2*i] == loop[0][2*i+1])  # pickup ↔ delivery same vehicle
+
+        arc = {(n, m): model.new_bool_var(f'a_{n}_{m}') for n in range(N) for m in range(N) if n != m}
+        circuit = [(n, n, loop[0][n]) for n in range(N)] + [(n, m, arc[(n, m)]) for (n, m) in arc]
+        model.add_circuit(circuit)
+
+        # Time variables.
+        tv = [model.new_int_var(0, HORIZON, f't_{n}') for n in range(N)]
+        model.add(tv[4] == 0)  # depart depot at time 0
+        for (n, m), a_var in arc.items():
+            tr = tran[n][m]
+            if tr > 0:
+                model.add(tv[m] >= tv[n] + tr).only_enforce_if(a_var)
+
+        # Time windows: req0 tw_hi=100 (reachable, transit=1), req1 tw_hi=10 (unreachable, transit=HORIZON).
+        tw_hi = [HORIZON] * N
+        tw_hi[0] = 100   # PICK(0): feasible (1 << 100)
+        tw_hi[2] = 10    # PICK(1): infeasible when visited (HORIZON >> 10)
+        for i in range(n_req):
+            visits = loop[0][2*i].negated()
+            model.add(tv[2*i] <= tw_hi[2*i]).only_enforce_if(visits)
+            model.add(tv[2*i+1] >= tv[2*i]).only_enforce_if(visits)
+
+        arc_vars, coeffs = [], []
+        for (n, m), a_var in arc.items():
+            c = tran[n][m]
+            if 0 < c < HORIZON:
+                arc_vars.append(a_var)
+                coeffs.append(c)
+        for i in range(n_req):
+            arc_vars.append(loop[0][2*i])
+            coeffs.append(SERVE_PENALTY)
+        model.minimize(cp_model.LinearExpr.weighted_sum(arc_vars, coeffs))
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 10
+        status = solver.solve(model)
+
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            q.put(('err', f'expected FEASIBLE/OPTIMAL, got status={status} (add_exactly_one would give INFEASIBLE)'))
+            return
+
+        # req 0 must be served (loop=0), req 1 must be skipped (loop=1) — too expensive to visit.
+        served_0 = (solver.boolean_value(loop[0][0]) == 0)
+        served_1 = (solver.boolean_value(loop[0][2]) == 0)
+        if not served_0:
+            q.put(('err', 'req 0 (feasible) was not served'))
+            return
+        if served_1:
+            q.put(('err', 'req 1 (blocked) was served — time window should have been violated'))
+            return
+        q.put(('ok', None))
+    except Exception:
+        import traceback
+        q.put(('err', traceback.format_exc()))
+
+
+def test_cpsat_optional_requests():
+    ctx = multiprocessing.get_context("spawn")
+    q = ctx.Queue()
+    p = ctx.Process(target=_cpsat_optional_worker, args=(q,))
+    p.start()
+    p.join(timeout=30)
+    if p.is_alive():
+        p.terminate(); p.join()
+        print("FAIL test_cpsat_optional_requests: timed out")
+        return False
+    if p.exitcode != 0:
+        print(f"FAIL test_cpsat_optional_requests: subprocess crashed (exit {p.exitcode})")
+        return False
+    try:
+        status, err = q.get_nowait()
+    except Exception as e:
+        print(f"FAIL test_cpsat_optional_requests: no result: {e}")
+        return False
+    if status != 'ok':
+        print(f"FAIL test_cpsat_optional_requests: {err}")
+        return False
+    print("PASS test_cpsat_optional_requests: blocked request skipped, feasible request served")
+    return True
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -265,6 +384,7 @@ if __name__ == "__main__":
     results.append(test_cw_chaining())
     results.append(test_numpy_pickle())
     results.append(test_cpsat_subprocess())
+    results.append(test_cpsat_optional_requests())
 
     print("=" * 60)
     passed = sum(results)

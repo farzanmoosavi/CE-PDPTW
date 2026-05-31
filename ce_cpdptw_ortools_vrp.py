@@ -196,9 +196,11 @@ class CPSATVRPRollingHorizonSolver:
                 if k2 != k:
                     model.add(loop[k][DEPOT(k2)] == 1)
 
-        # Each request served by exactly one vehicle; pickup and delivery same vehicle.
+        # Each request served by at most one vehicle; pickup and delivery same vehicle.
+        # at_most_one (not exactly_one) so that infeasible requests don't make the
+        # whole model INFEASIBLE — the solver will skip them and pay SERVE_PENALTY.
         for i in range(n_req):
-            model.add_exactly_one([loop[k][PICK(i)].negated() for k in range(n_veh)])
+            model.add_at_most_one([loop[k][PICK(i)].negated() for k in range(n_veh)])
             for k in range(n_veh):
                 # pickup visited ↔ delivery visited (same vehicle constraint)
                 model.add(loop[k][PICK(i)] == loop[k][DLIV(i)])
@@ -242,7 +244,12 @@ class CPSATVRPRollingHorizonSolver:
                 model.add(t[k][DLIV(i)] <= tw_hi[DLIV(i)]).only_enforce_if(visits)
                 model.add(t[k][DLIV(i)] >= t[k][PICK(i)]).only_enforce_if(visits)
 
-        # Objective: minimize total transit time (proxy for routing cost).
+        # Objective: minimize total transit + penalty for unserved requests.
+        # SERVE_PENALTY >> max possible transit per request, so serving is always
+        # preferred when feasible. loop[k][PICK(i)]=1 means vehicle k skips pickup i;
+        # marginal cost of not serving request i = SERVE_PENALTY (one extra loop=1
+        # compared to when it is served by one vehicle).
+        SERVE_PENALTY = 10 * HORIZON
         arc_vars: List[Any] = []
         coeffs: List[int] = []
         for k in range(n_veh):
@@ -251,6 +258,10 @@ class CPSATVRPRollingHorizonSolver:
                 if 0 < c < HORIZON:
                     arc_vars.append(a_var)
                     coeffs.append(c)
+        for i in range(n_req):
+            for k in range(n_veh):
+                arc_vars.append(loop[k][PICK(i)])
+                coeffs.append(SERVE_PENALTY)
         if arc_vars:
             model.minimize(cp_model.LinearExpr.weighted_sum(arc_vars, coeffs))
 
