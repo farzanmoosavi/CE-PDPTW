@@ -111,7 +111,7 @@ class ORToolsVRPRollingHorizonSolver:
     def solve(self, residual: Dict[str, Any]) -> Dict[int, List[Leg]]:
         import sys
         def _log(msg: str) -> None:
-            print(f"[ORToolsVRP] {msg}", flush=True, file=sys.stderr)
+            print(f"[ORToolsVRP] {msg}", flush=True)
 
         _log("solve() called")
         from ortools.constraint_solver import pywrapcp, routing_enums_pb2

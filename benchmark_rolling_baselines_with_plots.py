@@ -426,7 +426,7 @@ def run_one_rl_baseline(
 def _ortools_vrp_worker(result_queue: multiprocessing.Queue, payload: bytes) -> None:
     import sys, traceback
     def _log(msg):
-        print(f"[ortools_vrp_worker] {msg}", flush=True, file=sys.stderr)
+        print(f"[ortools_vrp_worker] {msg}", flush=True)
     _log("process started")
     try:
         kwargs = pickle.loads(payload)
@@ -466,7 +466,7 @@ def _ortools_vrp_isolated(full_instance: Dict[str, Any], **kwargs) -> List[Dict[
         # Negative exit = killed by signal (e.g. -11 = SIGSEGV, -6 = SIGABRT)
         sig = -p.exitcode if p.exitcode < 0 else None
         sig_name = {11: "SIGSEGV", 6: "SIGABRT", 9: "SIGKILL"}.get(sig, f"signal {sig}")
-        print(f"[ortools_vrp] subprocess exit {p.exitcode} ({sig_name})", flush=True, file=sys.stderr)
+        print(f"[ortools_vrp] subprocess exit {p.exitcode} ({sig_name})", flush=True)
         raise RuntimeError(f"ortools_vrp subprocess crashed (exit {p.exitcode}, {sig_name})")
     try:
         status, result = pickle.loads(q.get_nowait())
@@ -559,7 +559,7 @@ def run_one_baseline(
 
         elif baseline == "gurobi":
             import os, sys
-            print(f"[gurobi] GRB_LICENSE_FILE={os.environ.get('GRB_LICENSE_FILE', '(not set)')}", flush=True, file=sys.stderr)
+            print(f"[gurobi] GRB_LICENSE_FILE={os.environ.get('GRB_LICENSE_FILE', '(not set)')}", flush=True)
             config = ExactRollingConfig(
                 n_uav=n_uav,
                 n_adr=n_adr,
@@ -573,9 +573,9 @@ def run_one_baseline(
                 log_to_console=True,
                 n_threads=gurobi_threads,
             )
-            print(f"[gurobi] calling solve_static_instance_with_gurobi_rolling...", flush=True, file=sys.stderr)
+            print(f"[gurobi] calling solve_static_instance_with_gurobi_rolling...", flush=True)
             episode_log = solve_static_instance_with_gurobi_rolling(full_instance, config)
-            print(f"[gurobi] solve done", flush=True, file=sys.stderr)
+            print(f"[gurobi] solve done", flush=True)
 
         elif baseline == "ortools":
             config = ExactRollingConfig(
