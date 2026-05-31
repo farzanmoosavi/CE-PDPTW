@@ -668,6 +668,114 @@ class VNSSolver:
         return routes
 
 
+# ── 4. FIFO Solver ───────────────────────────────────────────────────────────
+
+class FIFOSolver:
+    """
+    FIFO dispatch: assign each waiting request (sorted by t_pickup) to the nearest
+    available vehicle by distance from its current route end-node to the pickup.
+    Appends pickup+delivery to the end of the chosen vehicle's route — no position
+    search.  Uses ce_cpdptw_alns infrastructure so arc masks and energy are enforced.
+    """
+
+    def solve(self, residual: Dict[str, Any]) -> Dict[int, List[Leg]]:
+        routes, available_vids, veh_list, req_list, full_instance, current_time, n_depots = _setup(residual)
+        if not req_list or not available_vids:
+            return routes
+
+        n_veh = len(available_vids)
+        dms = {
+            "uav": _get_distance_matrix(full_instance, "uav"),
+            "adr": _get_distance_matrix(full_instance, "adr"),
+        }
+
+        veh_stops: List[List[Tuple[int, str]]] = [[] for _ in range(n_veh)]
+        end_node: List[int] = [int(veh_list[k].current_node) for k in range(n_veh)]
+
+        sorted_pairs = sorted(enumerate(req_list), key=lambda x: (x[1].t_pickup, x[1].req_id))
+
+        for ri, req in sorted_pairs:
+            best_k, best_d = -1, 1e18
+            for k, veh in enumerate(veh_list):
+                mode = veh.normalized_mode()
+                dm = dms[mode]
+                candidate = veh_stops[k] + [(ri, "pickup"), (ri, "delivery")]
+                if not _check_cap(candidate, veh.capacity, veh.load, req_list):
+                    continue
+                en = end_node[k]
+                if en < 0 or en >= dm.shape[0] or req.pickup_node >= dm.shape[1]:
+                    continue
+                d = float(dm[en, req.pickup_node])
+                if d < 1e9 and d < best_d:
+                    best_d, best_k = d, k
+
+            if best_k < 0:
+                continue
+            veh_stops[best_k].extend([(ri, "pickup"), (ri, "delivery")])
+            end_node[best_k] = req.delivery_node
+
+        vehicles = residual["vehicles"]
+        for k, vid in enumerate(available_vids):
+            vs = copy.deepcopy(vehicles[vid])
+            if vs.battery_init is None:
+                vs.battery_init = float(vs.battery)
+            legs, _ = _materialize(veh_stops[k], vs, req_list, full_instance)
+            routes[vid] = legs
+
+        return routes
+
+
+# ── 5. Greedy Insertion Solver ────────────────────────────────────────────────
+
+class GreedyInsertionSolver:
+    """
+    Cheapest-insertion heuristic: for each waiting request (sorted by t_delivery),
+    find the (vehicle, position) pair with the smallest insertion cost delta and
+    insert there.  Uses ce_cpdptw_alns infrastructure so arc masks and energy are
+    enforced.  This replaces the dispatch_sim-based GreedyInsertion used in the RL
+    training pipeline, which skips arc mask checks.
+    """
+
+    def solve(self, residual: Dict[str, Any]) -> Dict[int, List[Leg]]:
+        routes, available_vids, veh_list, req_list, full_instance, current_time, n_depots = _setup(residual)
+        if not req_list or not available_vids:
+            return routes
+
+        n_veh = len(available_vids)
+        dms = {
+            "uav": _get_distance_matrix(full_instance, "uav"),
+            "adr": _get_distance_matrix(full_instance, "adr"),
+        }
+
+        veh_stops: List[List[Tuple[int, str]]] = [[] for _ in range(n_veh)]
+
+        sorted_pairs = sorted(enumerate(req_list), key=lambda x: (x[1].t_delivery, x[1].t_pickup, x[1].req_id))
+
+        for ri, _req in sorted_pairs:
+            best_cost, best_k, best_p, best_d_pos = 1e18, -1, 0, 1
+            for k, veh in enumerate(veh_list):
+                mode = veh.normalized_mode()
+                dm = dms[mode]
+                cost, p, d_pos = _best_insertion(ri, veh_stops[k], veh, req_list, dm, n_depots)
+                if cost < best_cost:
+                    best_cost, best_k, best_p, best_d_pos = cost, k, p, d_pos
+
+            if best_k < 0 or best_cost >= 1e17:
+                continue
+            veh_stops[best_k].insert(best_p, (ri, "pickup"))
+            veh_stops[best_k].insert(best_d_pos, (ri, "delivery"))
+
+        vehicles = residual["vehicles"]
+        for k, vid in enumerate(available_vids):
+            vs = copy.deepcopy(vehicles[vid])
+            if vs.battery_init is None:
+                vs.battery_init = float(vs.battery)
+            legs, _ = _materialize(veh_stops[k], vs, req_list, full_instance)
+            routes[vid] = legs
+
+        return routes
+
+
 # ── wrapper functions (online + offline for each solver) ──────────────────────
 
 def _make_wrapper(solver_cls, solver_kwargs=None):
@@ -757,3 +865,13 @@ def _make_wrapper(solver_cls, solver_kwargs=None):
     solve_static_instance_with_vns_rolling,
     solve_static_instance_with_vns_offline,
 ) = _make_wrapper(VNSSolver)
+
+(
+    solve_static_instance_with_fifo_rolling,
+    solve_static_instance_with_fifo_offline,
+) = _make_wrapper(FIFOSolver)
+
+(
+    solve_static_instance_with_greedy_rolling,
+    solve_static_instance_with_greedy_offline,
+) = _make_wrapper(GreedyInsertionSolver)

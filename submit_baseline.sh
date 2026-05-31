@@ -46,50 +46,61 @@ else
     echo "OR-Tools GLPK probe failed — OR-Tools MILP will be EXCLUDED."
 fi
 
-# ── OR-Tools VRP routing solver (pywrapcp) ────────────────────
-# Different API from the MILP solver above — tests the constraint-programming
-# routing engine used by ortools_vrp baseline.  Also probes for ABI issues.
+# ── OR-Tools CP-SAT (used by ortools_vrp baseline) ───────────────────────────
+# The ortools_vrp baseline uses CP-SAT (ortools.sat.python.cp_model), NOT pywrapcp.
+# CP-SAT has its own shared libraries and can crash independently of pywrapcp.
+# This probe runs a minimal add_circuit model — the same API the solver uses.
+# Important: the probe is run in a fresh subprocess (spawn) to match the exact
+# conditions under which the baseline runs.  pywrapcp may pass while CP-SAT fails.
 _HAVE_VRP=false
-echo "Testing OR-Tools VRP routing (pywrapcp) backend..."
+echo "Testing OR-Tools CP-SAT (subprocess spawn) — used by ortools_vrp baseline..."
 if timeout 60 python -c "
-from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-# Realistic probe: exercises AddDimensionWithVehicleTransits,
-# AddDimensionWithVehicleCapacity, and AddPickupAndDelivery —
-# the exact calls used in the real solver.  A shallow probe
-# (arc-cost only) passes even on nodes with ABI issues.
-# nodes: 0=dummy-end  1=veh-start  2=pickup  3=delivery
-mgr = pywrapcp.RoutingIndexManager(4, 1, [1], [0])
-rt = pywrapcp.RoutingModel(mgr)
-phys = [0, 1, 2, 3]
-def make_cb():
-    def cb(fi, ti):
-        return abs(phys[mgr.IndexToNode(fi)] - phys[mgr.IndexToNode(ti)])
-    return cb
-cb = make_cb()
-cb_refs = [cb]
-cb_idx = rt.RegisterTransitCallback(cb)
-rt.SetArcCostEvaluatorOfVehicle(cb_idx, 0)
-rt.AddDimensionWithVehicleTransits([cb_idx], 100, 1000, False, 'Time')
-td = rt.GetDimensionOrDie('Time')
-dem = [0, 0, 1, -1]
-def dcb(i): return dem[mgr.IndexToNode(i)]
-cb_refs.append(dcb)
-dcb_idx = rt.RegisterUnaryTransitCallback(dcb)
-rt.AddDimensionWithVehicleCapacity(dcb_idx, 0, [10], True, 'Cap')
-pick = mgr.NodeToIndex(2)
-dliv = mgr.NodeToIndex(3)
-rt.AddPickupAndDelivery(pick, dliv)
-slv = rt.solver()
-slv.Add(rt.VehicleVar(pick) == rt.VehicleVar(dliv))
-p = pywrapcp.DefaultRoutingSearchParameters()
-p.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
-sol = rt.SolveWithParameters(p)
-assert sol is not None
+import multiprocessing, sys, os
+
+def _probe(q):
+    try:
+        from ortools.sat.python import cp_model
+        model = cp_model.CpModel()
+        # Minimal add_circuit model: 3 nodes, 1 vehicle, depot=2
+        arcs = []
+        lits = []
+        for n in range(3):
+            for m in range(3):
+                if n != m:
+                    v = model.new_bool_var(f'a_{n}_{m}')
+                    arcs.append((n, m, v))
+                    lits.append(v)
+            loop = model.new_bool_var(f'lp_{n}')
+            arcs.append((n, n, loop))
+        model.add_circuit(arcs)
+        model.minimize(sum(lits))
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 5
+        status = solver.solve(model)
+        assert status in (cp_model.OPTIMAL, cp_model.FEASIBLE), f'bad status {status}'
+        q.put('ok')
+    except Exception as e:
+        q.put(f'err:{e}')
+
+ctx = multiprocessing.get_context('spawn')
+q = ctx.Queue()
+p = ctx.Process(target=_probe, args=(q,))
+p.start()
+p.join(timeout=30)
+if p.is_alive():
+    p.terminate(); p.join()
+    sys.exit(1)
+if p.exitcode != 0:
+    sys.exit(1)
+result = q.get_nowait()
+if result != 'ok':
+    sys.exit(1)
 " 2>/dev/null; then
     _HAVE_VRP=true
-    echo "OR-Tools VRP (pywrapcp) OK."
+    echo "OR-Tools CP-SAT (spawn subprocess) OK."
 else
-    echo "OR-Tools VRP probe failed — ortools_vrp baseline will be EXCLUDED."
+    echo "OR-Tools CP-SAT probe failed (subprocess exit -11 = SIGSEGV, or other error)."
+    echo "  ortools_vrp baseline will be EXCLUDED."
 fi
 
 # ── Gurobi ───────────────────────────────────────────────────

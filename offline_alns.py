@@ -36,7 +36,7 @@ def solve_static_instance_with_offline_alns(
     time_budget_large_s: float = 8.0,
 ):
     from ce_cpdptw_alns import (
-        build_dynamic_arrival_stream_from_instance,
+        build_static_arrival_stream_from_instance,
         build_initial_fleet_from_instance,
         infer_shift_minutes,
         RollingHorizonDispatcher,
@@ -47,7 +47,7 @@ def solve_static_instance_with_offline_alns(
         time_budget_small_s=time_budget_small_s,
         time_budget_large_s=time_budget_large_s,
     )
-    arrival_stream = build_dynamic_arrival_stream_from_instance(full_instance)
+    arrival_stream = build_static_arrival_stream_from_instance(full_instance)
     fleet = build_initial_fleet_from_instance(full_instance, config)
 
     sm = config.shift_minutes

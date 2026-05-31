@@ -527,26 +527,26 @@ def run_one_baseline(
             )
 
         elif baseline in ("fifo", "greedy"):
-            from dispatch_sim import RollingHorizonDispatcher
-            from coalition import make_fleet
-
-            if baseline == "fifo":
-                from fifo_baseline import FIFOSolver
-                inner_solver = FIFOSolver()
-            else:
-                from greedy_insertion import GreedyInsertion
-                inner_solver = GreedyInsertion()
-
-            sm = shift_minutes if shift_minutes is not None else 120.0
-            fleet = make_fleet(
-                n_uav=n_uav, n_adr=n_adr,
-                n_depots_uav=n_depots_uav, n_depots_adr=n_depots_adr,
+            # Use ce_cpdptw_alns-based implementations that enforce arc masks and
+            # energy constraints identically to ALNS.  The dispatch_sim-based versions
+            # (fifo_baseline.py / greedy_insertion.py) skip arc mask checks, producing
+            # ~21% arc infeasibility (greedy) — not comparable to ALNS.
+            from ce_cpdptw_vrp_heuristics import (
+                solve_static_instance_with_fifo_rolling,
+                solve_static_instance_with_greedy_rolling,
             )
-            arrivals = _arrivals_from_instance(full_instance)
-            dispatcher = RollingHorizonDispatcher(
-                inner_solver, delta_minutes=delta_minutes, shift_minutes=sm,
+            _fn = solve_static_instance_with_fifo_rolling if baseline == "fifo" \
+                  else solve_static_instance_with_greedy_rolling
+            episode_log = _fn(
+                full_instance,
+                n_uav=n_uav,
+                n_adr=n_adr,
+                n_depots_uav=n_depots_uav,
+                n_depots_adr=n_depots_adr,
+                depot_sharing=depot_sharing,
+                delta_minutes=delta_minutes,
+                shift_minutes=shift_minutes,
             )
-            episode_log = dispatcher.run_shift(arrivals, fleet, full_instance)
 
         elif baseline == "gurobi":
             config = ExactRollingConfig(
