@@ -140,7 +140,9 @@ fi
 #                  ~8s/re-plan, GLS metaheuristic; primary RL comparison baseline)
 BL_AB="fifo,greedy,alns,offline_alns"
 BL_C="fifo,greedy,alns,offline_alns"
-$_HAVE_VRP && BL_AB="$BL_AB,ortools_vrp"  # routing VRP — primary RL comparison baseline
+# ortools_vrp excluded: pywrapcp segfaults on CC when torch is loaded in the same process (ABI conflict).
+# Re-enable once tested on a node without libpyg.so ABI issues.
+# $_HAVE_VRP && BL_AB="$BL_AB,ortools_vrp"
 $_HAVE_GRB && BL_AB="$BL_AB,gurobi" && BL_C="$BL_C,gurobi"
 $_HAVE_ORT && BL_AB="$BL_AB,ortools"   # OR-Tools MILP A/B only — too slow at n_req>=25
 BL_D="fifo,greedy,alns,offline_alns"   # exact solvers never tractable at n_req=60
