@@ -235,8 +235,16 @@ class ORToolsVRPRollingHorizonSolver:
         _cb_refs: List = []
         modes = [v.normalized_mode() for v in veh_list]
 
+        # Bounds-checked callbacks: OR-Tools 9.x may call with indices outside
+        # [0, n_nodes) for internal start/end slots.  An uncaught IndexError from
+        # a Python callback propagates as SIGSEGV through OR-Tools C++.
+        _n_cb = len(cost_uav)
+
         def _make_cost_cb(cost_mat: List[List[int]]):
+            _n = len(cost_mat)
             def cb(fi: int, ti: int) -> int:
+                if fi < 0 or ti < 0 or fi >= _n or ti >= _n:
+                    return _BIG_M_INT
                 return cost_mat[fi][ti]
             return cb
 
@@ -252,6 +260,8 @@ class ORToolsVRPRollingHorizonSolver:
             transit_indices.append(cb_idx)
             routing.SetArcCostEvaluatorOfVehicle(cb_idx, v_i)
 
+        print(f"[ortools_vrp] step1: callbacks registered ({n_vehicles}v {n_requests}r)", flush=True)
+
         # Time dimension with per-vehicle transit
         HORIZON_INT = int(1000 * _TIME_SCALE)
         SLACK_INT = int(60 * _TIME_SCALE)
@@ -263,9 +273,13 @@ class ORToolsVRPRollingHorizonSolver:
             "Time",
         )
         time_dim = routing.GetDimensionOrDie("Time")
+        print("[ortools_vrp] step2: time dimension added", flush=True)
 
         # Capacity dimension
+        _n_dem = len(demand_by_idx)
         def demand_cb(idx: int) -> int:
+            if idx < 0 or idx >= _n_dem:
+                return 0
             return demand_by_idx[idx]
 
         _cb_refs.append(demand_cb)
@@ -277,6 +291,7 @@ class ORToolsVRPRollingHorizonSolver:
             True,
             "Capacity",
         )
+        print("[ortools_vrp] step3: capacity dimension added", flush=True)
 
         # Pickup-delivery pairs with same-vehicle and precedence constraints
         solver = routing.solver()
@@ -306,6 +321,8 @@ class ORToolsVRPRollingHorizonSolver:
             time_dim.CumulVar(routing.Start(v_i)).SetRange(0, 0)
             time_dim.CumulVar(routing.End(v_i)).SetRange(0, HORIZON_INT)
 
+        print("[ortools_vrp] step4: constraints set, calling Solve", flush=True)
+
         # Search parameters.
         # GREEDY_DESCENT avoids the C++ thread pool used by GUIDED_LOCAL_SEARCH;
         # GLS calls Python callbacks from non-GIL threads, causing SIGSEGV on CC.
@@ -320,6 +337,7 @@ class ORToolsVRPRollingHorizonSolver:
         params.log_search = False
 
         solution = routing.SolveWithParameters(params)
+        print(f"[ortools_vrp] step5: solve done, solution={'found' if solution else 'None'}", flush=True)
         if solution is None:
             return routes
 
