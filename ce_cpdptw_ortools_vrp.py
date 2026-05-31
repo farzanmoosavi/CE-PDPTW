@@ -310,6 +310,8 @@ class CPSATVRPRollingHorizonSolver:
                         leg, veh_state, ok = _simulate_leg(veh_state, None, "depot", depot, full_instance)
                         if ok and leg is not None:
                             legs.append(leg)
+                        elif not ok:
+                            break  # recharge leg failed — vehicle cannot proceed
 
                 leg, veh_state, ok = _simulate_leg(veh_state, req, leg_type, to_node, full_instance)
                 if ok and leg is not None:
