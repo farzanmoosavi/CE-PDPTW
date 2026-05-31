@@ -1,4 +1,7 @@
-import torch
+# torch is NOT imported at module level — only the RL training functions need it.
+# Lazy imports inside each function prevent loading torch in baseline worker
+# subprocesses (ce_cpdptw_alns → vrpUpdate), which would conflict with OR-Tools'
+# libprotobuf and cause SIGSEGV in spawn subprocesses on CC clusters.
 
 SCALE_M_PER_COORD = 200.0
 
@@ -17,6 +20,7 @@ V_ADR_MIN_PICKUP = 2.0 * 60.0 / SCALE_M_PER_COORD
 UAV_LAND_TAKEOFF_MIN = 2.0
 
 def PC_uav(payload_kg, v_ground):
+    import torch
     nu = 0.9
     rho = 1.225
     mass = 12.0
@@ -33,6 +37,7 @@ def PC_uav(payload_kg, v_ground):
     return torch.clamp(power, min=0.0)
 
 def PC_adr(payload_kg, v_ground):
+    import torch
     c_r = 0.25
     nu = 0.8
     mass = 30.0
@@ -40,6 +45,7 @@ def PC_adr(payload_kg, v_ground):
     return torch.clamp(power, min=0.0)
 
 def _pickup_speed(distance, t_now, t_target, v_min, v_max):
+    import torch
     slack = torch.clamp(t_target - t_now, min=0.0)
     exact_speed = distance / torch.clamp(slack, min=1e-8)
     speed = torch.clamp(exact_speed, min=v_min, max=v_max)
@@ -62,6 +68,7 @@ def _apply_pickup_updates(
     power_fn,
     extra_service_time=0.0,
 ):
+    import torch
     if not mask.any():
         return
 
@@ -90,6 +97,7 @@ def _apply_delivery_updates(
     power_fn,
     extra_service_time=0.0,
 ):
+    import torch
     if not mask.any():
         return
 
@@ -103,6 +111,7 @@ def _apply_delivery_updates(
 
 def update_state(demand, time_window, battery, T_t, capacity, E,
                  num_uav, actions, edge_attr_uav, edge_attr_adr, num_depots=None):
+    import torch
     previous_indices = actions[-2].squeeze(2)
     current_indices = actions[-1].squeeze(2)
 
@@ -218,6 +227,7 @@ def update_state(demand, time_window, battery, T_t, capacity, E,
 def update_mask(demand, capacity, selected, mask, battery, num_uav, E, i,
                 acc_uav=None, acc_adr=None,
                 edge_attr_d=None, edge_attr_r=None, num_depots=None):
+    import torch
     batch_size, n_agents = selected.size()
     if num_depots is None:
         num_depots = int((demand == 0).sum().item() // batch_size)

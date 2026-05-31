@@ -48,59 +48,50 @@ fi
 
 # ── OR-Tools CP-SAT (used by ortools_vrp baseline) ───────────────────────────
 # The ortools_vrp baseline uses CP-SAT (ortools.sat.python.cp_model), NOT pywrapcp.
-# CP-SAT has its own shared libraries and can crash independently of pywrapcp.
-# This probe runs a minimal add_circuit model — the same API the solver uses.
-# Important: the probe is run in a fresh subprocess (spawn) to match the exact
-# conditions under which the baseline runs.  pywrapcp may pass while CP-SAT fails.
+# The probe must test CP-SAT in a FRESH subprocess to match how the benchmark runs
+# (spawn isolation).
+#
+# NOTE: multiprocessing.spawn inside a python -c script cannot pickle functions
+# defined in that script (__main__ has no file path → PicklingError → always fails).
+# Instead we use subprocess.run([sys.executable, '-c', code]) which starts a fresh
+# Python interpreter directly, no pickling needed.
+#
+# NOTE: vrpUpdate.py previously did "import torch" at module level, which loaded
+# torch alongside OR-Tools → libprotobuf ABI conflict → SIGSEGV.  Fixed by making
+# torch a lazy import (inside each function that uses it).  The probe now correctly
+# tests whether CP-SAT itself works in a subprocess.
 _HAVE_VRP=false
-echo "Testing OR-Tools CP-SAT (subprocess spawn) — used by ortools_vrp baseline..."
-if timeout 60 python -c "
-import multiprocessing, sys, os
-
-def _probe(q):
-    try:
-        from ortools.sat.python import cp_model
-        model = cp_model.CpModel()
-        # Minimal add_circuit model: 3 nodes, 1 vehicle, depot=2
-        arcs = []
-        lits = []
-        for n in range(3):
-            for m in range(3):
-                if n != m:
-                    v = model.new_bool_var(f'a_{n}_{m}')
-                    arcs.append((n, m, v))
-                    lits.append(v)
-            loop = model.new_bool_var(f'lp_{n}')
-            arcs.append((n, n, loop))
-        model.add_circuit(arcs)
-        model.minimize(sum(lits))
-        solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 5
-        status = solver.solve(model)
-        assert status in (cp_model.OPTIMAL, cp_model.FEASIBLE), f'bad status {status}'
-        q.put('ok')
-    except Exception as e:
-        q.put(f'err:{e}')
-
-ctx = multiprocessing.get_context('spawn')
-q = ctx.Queue()
-p = ctx.Process(target=_probe, args=(q,))
-p.start()
-p.join(timeout=30)
-if p.is_alive():
-    p.terminate(); p.join()
+echo "Testing OR-Tools CP-SAT in fresh subprocess (used by ortools_vrp baseline)..."
+if python - 2>/dev/null <<'PYEOF'
+import subprocess, sys, textwrap
+probe = textwrap.dedent("""
+    from ortools.sat.python import cp_model
+    model = cp_model.CpModel()
+    arcs = []
+    for n in range(3):
+        for m in range(3):
+            if n != m:
+                v = model.new_bool_var('a_{}_{}'.format(n, m))
+                arcs.append((n, m, v))
+        lp = model.new_bool_var('lp_{}'.format(n))
+        arcs.append((n, n, lp))
+    model.add_circuit(arcs)
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 5
+    status = solver.solve(model)
+    assert status in (cp_model.OPTIMAL, cp_model.FEASIBLE), 'bad status {}'.format(status)
+""")
+try:
+    result = subprocess.run([sys.executable, '-c', probe], timeout=30)
+    sys.exit(result.returncode)
+except Exception as e:
+    print('probe exception:', e, file=sys.stderr)
     sys.exit(1)
-if p.exitcode != 0:
-    sys.exit(1)
-result = q.get_nowait()
-if result != 'ok':
-    sys.exit(1)
-" 2>/dev/null; then
+PYEOF
     _HAVE_VRP=true
-    echo "OR-Tools CP-SAT (spawn subprocess) OK."
+    echo "OR-Tools CP-SAT (subprocess) OK."
 else
-    echo "OR-Tools CP-SAT probe failed (subprocess exit -11 = SIGSEGV, or other error)."
-    echo "  ortools_vrp baseline will be EXCLUDED."
+    echo "OR-Tools CP-SAT probe failed — ortools_vrp will be EXCLUDED."
 fi
 
 # ── Gurobi ───────────────────────────────────────────────────
