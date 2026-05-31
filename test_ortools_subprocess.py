@@ -372,6 +372,115 @@ def test_cpsat_optional_requests():
     return True
 
 
+# ── Test 6: depot self-loop allowed when ALL requests are infeasible ──────────
+
+def _cpsat_depot_selfloop_worker(q):
+    """Worker: CP-SAT model with conditional depot constraint remains FEASIBLE
+    when every request is time-window infeasible (all must be skipped).
+
+    This tests the fix for `model.add(loop[k][DEPOT(k)] == 0)` → conditional.
+    With the old constraint (forced loop[DEPOT]=0) and all pickups loop=1,
+    add_circuit had no valid circuit and returned INFEASIBLE.
+    With the new constraint (loop[DEPOT] <= loop[PICK(i)] for all i),
+    the depot can self-loop when every pickup is skipped → FEASIBLE.
+    """
+    try:
+        from ortools.sat.python import cp_model
+        HORIZON = 100000
+        SERVE_PENALTY = 10 * HORIZON
+
+        model = cp_model.CpModel()
+        n_veh, n_req = 1, 2
+        N = 2 * n_req + n_veh  # nodes: 0=PICK0, 1=DLIV0, 2=PICK1, 3=DLIV1, 4=DEPOT
+
+        loop = [[model.new_bool_var(f'lp_{k}_{n}') for n in range(N)] for k in range(n_veh)]
+
+        # NEW conditional constraint: depot forced non-self-loop only when a pickup is visited
+        for i in range(n_req):
+            model.add(loop[0][4] <= loop[0][2 * i])
+
+        # All request transits are HORIZON so they'll all be skipped
+        tran = [[HORIZON] * N for _ in range(N)]
+        for n in range(N):
+            tran[n][n] = 0
+
+        model.add_at_most_one([loop[0][0].negated()])
+        model.add_at_most_one([loop[0][2].negated()])
+        for i in range(n_req):
+            model.add(loop[0][2 * i] == loop[0][2 * i + 1])
+
+        arc = {(n, m): model.new_bool_var(f'a_{n}_{m}') for n in range(N) for m in range(N) if n != m}
+        circuit = [(n, n, loop[0][n]) for n in range(N)] + [(n, m, arc[(n, m)]) for (n, m) in arc]
+        model.add_circuit(circuit)
+
+        tv = [model.new_int_var(0, HORIZON, f't_{n}') for n in range(N)]
+        model.add(tv[4] == 0)
+
+        # Time propagation: if arc n→m active, arrival at m ≥ departure from n + transit.
+        for (n, m), a_var in arc.items():
+            tr = tran[n][m]
+            if tr > 0:
+                model.add(tv[m] >= tv[n] + tr).only_enforce_if(a_var)
+
+        # All pickups have tw_hi=1, transit=HORIZON → all infeasible (HORIZON >> 1)
+        tw_hi = [1, HORIZON, 1, HORIZON, HORIZON]
+        for i in range(n_req):
+            visits = loop[0][2 * i].negated()
+            model.add(tv[2 * i] <= tw_hi[2 * i]).only_enforce_if(visits)
+
+        arc_vars, coeffs = [], []
+        for i in range(n_req):
+            arc_vars.append(loop[0][2 * i])
+            coeffs.append(SERVE_PENALTY)
+        model.minimize(cp_model.LinearExpr.weighted_sum(arc_vars, coeffs))
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 10
+        status = solver.solve(model)
+
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            q.put(('err', f'INFEASIBLE (status={status}) — depot self-loop fix missing? '
+                          'Unconditional loop[DEPOT]==0 causes INFEASIBLE when all requests skipped.'))
+            return
+
+        # Both requests must be skipped (loop=1)
+        skip_0 = solver.boolean_value(loop[0][0])
+        skip_1 = solver.boolean_value(loop[0][2])
+        if not skip_0 or not skip_1:
+            q.put(('err', f'Expected both requests skipped (HORIZON transit > tw_hi=1). '
+                          f'skip_0={skip_0}, skip_1={skip_1}'))
+            return
+        q.put(('ok', None))
+    except Exception:
+        import traceback
+        q.put(('err', traceback.format_exc()))
+
+
+def test_cpsat_depot_selfloop():
+    ctx = multiprocessing.get_context("spawn")
+    q = ctx.Queue()
+    p = ctx.Process(target=_cpsat_depot_selfloop_worker, args=(q,))
+    p.start()
+    p.join(timeout=30)
+    if p.is_alive():
+        p.terminate(); p.join()
+        print("FAIL test_cpsat_depot_selfloop: timed out")
+        return False
+    if p.exitcode != 0:
+        print(f"FAIL test_cpsat_depot_selfloop: subprocess crashed (exit {p.exitcode})")
+        return False
+    try:
+        status, err = q.get_nowait()
+    except Exception as e:
+        print(f"FAIL test_cpsat_depot_selfloop: no result: {e}")
+        return False
+    if status != 'ok':
+        print(f"FAIL test_cpsat_depot_selfloop: {err}")
+        return False
+    print("PASS test_cpsat_depot_selfloop: all-infeasible requests -> FEASIBLE empty routes")
+    return True
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -385,6 +494,7 @@ if __name__ == "__main__":
     results.append(test_numpy_pickle())
     results.append(test_cpsat_subprocess())
     results.append(test_cpsat_optional_requests())
+    results.append(test_cpsat_depot_selfloop())
 
     print("=" * 60)
     passed = sum(results)
