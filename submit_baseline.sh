@@ -25,6 +25,18 @@ module purge
 module load python/3.10 scipy-stack
 source ~/py310_nibi/bin/activate
 
+# ── Install OR-Tools if missing ───────────────────────────────
+# OR-Tools is not in CC's curated wheel set, so install from PyPI.
+# Login/compute nodes on Narval have outbound HTTPS; if not, pre-install
+# on the login node with: pip install ortools
+if ! python -c "import ortools" 2>/dev/null; then
+    echo "ortools not found — installing from PyPI..."
+    pip install ortools --quiet && echo "ortools installed OK." \
+        || echo "WARNING: ortools install failed — ortools_vrp and ortools baselines will be EXCLUDED."
+else
+    echo "ortools already installed."
+fi
+
 # ── OR-Tools (MILP linear solver) ────────────────────────────
 # SCIP backend segfaults on CC (ABI mismatch).  Use GLPK instead — it is bundled
 # inside the ortools wheel and needs no external library.  Probe before enabling.
