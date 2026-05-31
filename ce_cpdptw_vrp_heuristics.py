@@ -167,30 +167,18 @@ def _insertion_delta(
                     (_tmin(pick_phys, b, mode, dm, n_dep) if b >= 0 else 0.0))
     delta_p = cost_after_p - cost_before_p
 
-    # After pickup inserted, effective index of delivery position is d (in the new sequence)
-    # stops has pickup inserted at p, so stop at new index d is old stop at d-1
-    def node_at_after(idx: int) -> int:
-        if idx < 0:
-            return start
-        adj = idx if idx <= p else idx - 1  # map new index back to original stops
-        if adj >= n:
-            return -1
-        r, lt = stops[adj]
-        return req_list[r].pickup_node if lt == "pickup" else req_list[r].delivery_node
-
-    # But for d > p, pickup is now at position p in the expanded list
-    # The node before d in expanded list:
+    # After pickup inserted at p, the sequence is [stops[0..p-1], pick, stops[p..n-1]].
+    # exp_node(idx) gives the physical node at position idx in this expanded sequence.
+    # d is the delivery insertion position in this expanded sequence (d >= p+1).
     def exp_node(idx: int) -> int:
-        """Node at position idx in sequence [stops[0..p-1], pick, stops[p..], dliv, stops[d..]]."""
         if idx == p:
-            return pick_phys
+            return pick_phys      # the pickup we just inserted
         if idx < p:
-            return node_at(idx)
-        # idx > p: maps to stops[idx-1]
-        return node_at(idx - 1)
+            return node_at(idx)   # unchanged prefix
+        return node_at(idx - 1)   # shifted by 1 due to pickup insertion
 
-    c_before_d = node_at_after(d - 1)
-    c_after_d  = node_at_after(d)
+    c_before_d = exp_node(d - 1)
+    c_after_d  = exp_node(d)
 
     cost_before_d = _tmin(c_before_d, c_after_d, mode, dm, n_dep) if c_after_d >= 0 else 0.0
     cost_after_d = (_tmin(c_before_d, dliv_phys, mode, dm, n_dep) +
@@ -340,19 +328,25 @@ class ClarkeWrightSolver:
 
         savings.sort(key=lambda x: -x[0])
 
-        # Step 2: Greedily chain routes by savings
-        # route_tail[k] = last request index in vehicle k's route (for chaining check)
+        # Step 2: Greedily chain routes by savings.
+        # Standard CW: chain unassigned request j onto the tail of vehicle k's route,
+        # where the tail is request i (already on k, or k is empty and i is unassigned).
+        # j must always be unassigned; i must be at k's tail or k must be empty+i unassigned.
         route_tail: Dict[int, int] = {}  # k -> last req index
 
         for s, k, i, j in savings:
             if s <= 0:
                 break
-            if i in assigned or j in assigned:
+            if j in assigned:
                 continue
-            # Check that i is at the tail of vehicle k's route (or route is empty)
-            if veh_stops[k] and route_tail.get(k) != i:
-                continue
-            # Check we can append (pickup_i, delivery_i, pickup_j, delivery_j)
+            if veh_stops[k]:
+                # Route exists: i must be the tail (already assigned to k)
+                if route_tail.get(k) != i:
+                    continue
+            else:
+                # Empty route: both i and j must be unassigned
+                if i in assigned:
+                    continue
             candidate = list(veh_stops[k])
             if not veh_stops[k]:
                 candidate.extend([(i, "pickup"), (i, "delivery")])

@@ -434,6 +434,26 @@ def _ortools_vrp_worker(result_queue: multiprocessing.Queue, payload: bytes) -> 
         result_queue.put(pickle.dumps(('err', f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")))
 
 
+def _instance_to_numpy(full_instance: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of full_instance with all torch.Tensor values replaced by numpy arrays.
+
+    full_instance is created by creat_vrp.create_instance() which returns torch tensors.
+    Pickling tensors embeds a torch.Tensor class reference, forcing the subprocess to
+    import torch when unpickling — which reintroduces the libprotobuf ABI conflict with
+    OR-Tools even after lazy-importing torch in vrpUpdate.py.  Converting to numpy first
+    keeps the subprocess entirely torch-free.
+    """
+    out = {}
+    for k, v in full_instance.items():
+        if hasattr(v, "numpy"):
+            out[k] = v.detach().cpu().numpy()
+        elif hasattr(v, "cpu") and hasattr(v, "numpy"):
+            out[k] = v.cpu().numpy()
+        else:
+            out[k] = v
+    return out
+
+
 def _ortools_vrp_isolated(full_instance: Dict[str, Any], **kwargs) -> List[Dict[str, Any]]:
     """Run the OR-Tools VRP solver in a fresh spawn subprocess.
 
@@ -443,7 +463,9 @@ def _ortools_vrp_isolated(full_instance: Dict[str, Any], **kwargs) -> List[Dict[
     """
     import sys
     timeout = float(kwargs.get("time_limit_seconds", 10.0)) * 3 + 60
-    payload = pickle.dumps({"full_instance": full_instance, **kwargs})
+    # Convert torch tensors → numpy so unpickling in the subprocess never imports torch.
+    numpy_instance = _instance_to_numpy(full_instance)
+    payload = pickle.dumps({"full_instance": numpy_instance, **kwargs})
     ctx = multiprocessing.get_context("spawn")
     q: multiprocessing.Queue = ctx.Queue()
     p = ctx.Process(target=_ortools_vrp_worker, args=(q, payload))
