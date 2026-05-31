@@ -424,23 +424,14 @@ def run_one_rl_baseline(
         return failed_row('rl', instance_id, exc, wall_time)
 
 def _ortools_vrp_worker(result_queue: multiprocessing.Queue, payload: bytes) -> None:
-    import sys, traceback
-    def _log(msg):
-        print(f"[ortools_vrp_worker] {msg}", flush=True)
-    _log("process started")
     try:
         kwargs = pickle.loads(payload)
-        _log(f"payload loaded: n_uav={kwargs.get('n_uav')} n_adr={kwargs.get('n_adr')}")
         from ce_cpdptw_ortools_vrp import solve_static_instance_with_ortools_vrp_rolling
-        _log("solver imported")
         result = solve_static_instance_with_ortools_vrp_rolling(**kwargs)
-        _log(f"solve done: {len(result)} log entries")
         result_queue.put(pickle.dumps(('ok', result)))
-        _log("result queued OK")
     except Exception as exc:
-        _log(f"EXCEPTION: {type(exc).__name__}: {exc}")
-        _log(traceback.format_exc())
-        result_queue.put(pickle.dumps(('err', f"{type(exc).__name__}: {exc}")))
+        import traceback
+        result_queue.put(pickle.dumps(('err', f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")))
 
 
 def _ortools_vrp_isolated(full_instance: Dict[str, Any], **kwargs) -> List[Dict[str, Any]]:
@@ -558,8 +549,6 @@ def run_one_baseline(
             episode_log = dispatcher.run_shift(arrivals, fleet, full_instance)
 
         elif baseline == "gurobi":
-            import os, sys
-            print(f"[gurobi] GRB_LICENSE_FILE={os.environ.get('GRB_LICENSE_FILE', '(not set)')}", flush=True)
             config = ExactRollingConfig(
                 n_uav=n_uav,
                 n_adr=n_adr,
@@ -570,12 +559,10 @@ def run_one_baseline(
                 shift_minutes=shift_minutes,
                 time_limit_seconds=exact_time_limit_seconds,
                 mip_gap=exact_mip_gap,
-                log_to_console=True,
+                log_to_console=False,
                 n_threads=gurobi_threads,
             )
-            print(f"[gurobi] calling solve_static_instance_with_gurobi_rolling...", flush=True)
             episode_log = solve_static_instance_with_gurobi_rolling(full_instance, config)
-            print(f"[gurobi] solve done", flush=True)
 
         elif baseline == "ortools":
             config = ExactRollingConfig(
