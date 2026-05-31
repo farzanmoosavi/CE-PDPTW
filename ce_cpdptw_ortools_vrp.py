@@ -160,11 +160,49 @@ class CPSATVRPRollingHorizonSolver:
             svc = _service_time(mode) if not to_dep else 0.0
             return int((tm + svc) * TSCALE)
 
+        def _trav_energy(k: int, n: int, m: int) -> int:
+            """Like _trav but inflates cost when vehicle k's battery is tight on arc phys[n]→phys[m].
+
+            Uses vehicle's starting battery (conservative: actual battery only decreases).
+            When recharge is expected, replaces base transit with detour-via-nearest-depot time
+            so CP-SAT naturally routes around battery-heavy arcs.
+            """
+            fp, tp = phys[n], phys[m]
+            mode = modes[k]
+            base = _trav(fp, tp, mode)
+            if base >= HORIZON or fp < n_depots:
+                # At/from depot battery is full; no recharge overhead on outbound arc.
+                return base
+            vk = veh_list[k]
+            dm = dm_uav if mode == "uav" else dm_adr
+            n_p = len(dm)
+            if fp >= n_p or tp >= n_p:
+                return base
+            d = float(dm[fp][tp])
+            if not math.isfinite(d) or d >= 1e9:
+                return base
+            to_dep = tp < n_depots
+            spd = _depot_speed(mode) if (to_dep and fp >= n_depots) else _cruise_speed(mode)
+            energy = _edge_energy_kj(
+                mode=mode, distance=d, payload=float(vk.load),
+                wind_vec=_wind_vec(full_instance), speed=spd,
+            )
+            if float(vk.battery) - energy < _battery_threshold(vk):
+                mock = copy.copy(vk)
+                mock.current_node = fp
+                depot_node = _nearest_feasible_depot(fp, mock, full_instance)
+                if depot_node is not None:
+                    detour = _trav(fp, depot_node, mode) + _trav(depot_node, tp, mode)
+                    return min(detour, HORIZON)
+            return base
+
         modes = [v.normalized_mode() for v in veh_list]
 
-        # tran[k][n][m] = integer travel time for vehicle k from CP node n to m
+        # tran[k][n][m] = integer travel time for vehicle k from CP node n to m.
+        # Uses energy-adjusted transit: arcs where battery would be exhausted are
+        # replaced with detour-via-depot time so CP-SAT routes around them.
         tran: List[List[List[int]]] = [
-            [[_trav(phys[n], phys[m], modes[k]) for m in range(N)] for n in range(N)]
+            [[_trav_energy(k, n, m) for m in range(N)] for n in range(N)]
             for k in range(n_veh)
         ]
 

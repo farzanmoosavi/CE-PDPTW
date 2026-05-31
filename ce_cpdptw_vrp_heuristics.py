@@ -106,6 +106,29 @@ def _route_cost(
     return cost
 
 
+def _route_cost_energy(
+    stops: List[Tuple[int, str]],
+    veh: Vehicle,
+    req_list: List[Request],
+    full_instance: Dict[str, Any],
+) -> float:
+    """Physics-accurate route cost including recharge detour overhead.
+
+    Uses _materialize (same execution path as the real dispatch) so the
+    VNS objective accounts for energy detours rather than ignoring them.
+    Returns 1e9 when materialization fails (energy infeasible route).
+    """
+    if not stops:
+        return 0.0
+    vs = copy.deepcopy(veh)
+    if vs.battery_init is None:
+        vs.battery_init = float(vs.battery)
+    legs, _ = _materialize(stops, vs, req_list, full_instance)
+    if not legs:
+        return 1e9
+    return sum(leg.travel_time for leg in legs)
+
+
 def _check_cap(
     stops: List[Tuple[int, str]],
     capacity: float,
@@ -497,16 +520,9 @@ class VNSSolver:
 
     # ── internal helpers ──────────────────────────────────────────────────
 
-    def _total_cost(self, veh_stops, veh_list, req_list, dms, n_depots):
+    def _total_cost(self, veh_stops, veh_list, req_list, full_instance):
         return sum(
-            _route_cost(
-                veh_stops[k],
-                int(veh_list[k].current_node),
-                veh_list[k].normalized_mode(),
-                dms[veh_list[k].normalized_mode()],
-                n_depots,
-                req_list,
-            )
+            _route_cost_energy(veh_stops[k], veh_list[k], req_list, full_instance)
             for k in range(len(veh_list))
         )
 
@@ -527,11 +543,11 @@ class VNSSolver:
             veh_stops[best_k].insert(best_d, (ri, "delivery"))
         return veh_stops
 
-    def _relocate(self, veh_stops, veh_list, req_list, dms, n_depots):
+    def _relocate(self, veh_stops, veh_list, req_list, dms, n_depots, full_instance):
         """N1: try moving each request to a better position anywhere."""
         n_veh = len(veh_list)
         improved = False
-        current_cost = self._total_cost(veh_stops, veh_list, req_list, dms, n_depots)
+        current_cost = self._total_cost(veh_stops, veh_list, req_list, full_instance)
 
         for src_k in range(n_veh):
             req_indices = sorted({ri for ri, _ in veh_stops[src_k]})
@@ -550,11 +566,11 @@ class VNSSolver:
                     if not self._feasible(candidate_dst, veh_list[dst_k], req_list):
                         continue
 
-                    # Evaluate new total cost
+                    # Evaluate new total cost with physics-accurate energy simulation
                     new_stops = [list(s) for s in veh_stops]
                     new_stops[src_k] = new_src
                     new_stops[dst_k] = candidate_dst
-                    new_cost = self._total_cost(new_stops, veh_list, req_list, dms, n_depots)
+                    new_cost = self._total_cost(new_stops, veh_list, req_list, full_instance)
                     if new_cost < current_cost - 1e-6:
                         for k in range(n_veh):
                             veh_stops[k] = new_stops[k]
@@ -568,11 +584,11 @@ class VNSSolver:
 
         return improved
 
-    def _swap(self, veh_stops, veh_list, req_list, dms, n_depots):
+    def _swap(self, veh_stops, veh_list, req_list, dms, n_depots, full_instance):
         """N2: try swapping any two requests between routes."""
         n_veh = len(veh_list)
         improved = False
-        current_cost = self._total_cost(veh_stops, veh_list, req_list, dms, n_depots)
+        current_cost = self._total_cost(veh_stops, veh_list, req_list, full_instance)
 
         req_by_veh = [{ri for ri, _ in veh_stops[k]} for k in range(n_veh)]
 
@@ -610,7 +626,7 @@ class VNSSolver:
                         new_stops = [list(s) for s in veh_stops]
                         new_stops[k1] = new_s1
                         new_stops[k2] = new_s2
-                        new_cost = self._total_cost(new_stops, veh_list, req_list, dms, n_depots)
+                        new_cost = self._total_cost(new_stops, veh_list, req_list, full_instance)
 
                         if new_cost < current_cost - 1e-6:
                             for k in range(n_veh):
@@ -642,15 +658,15 @@ class VNSSolver:
         # Initial solution: greedy insertion
         veh_stops = self._greedy_init(req_list, veh_list, dms, n_depots)
 
-        # VNS main loop
+        # VNS main loop — objective uses _route_cost_energy (physics-accurate, energy-aware)
         deadline = time.perf_counter() + self.time_limit_seconds
         k_max = 2  # number of neighborhoods
         k = 0
         while k < k_max and time.perf_counter() < deadline:
             if k == 0:
-                improved = self._relocate(veh_stops, veh_list, req_list, dms, n_depots)
+                improved = self._relocate(veh_stops, veh_list, req_list, dms, n_depots, full_instance)
             else:
-                improved = self._swap(veh_stops, veh_list, req_list, dms, n_depots)
+                improved = self._swap(veh_stops, veh_list, req_list, dms, n_depots, full_instance)
             k = 0 if improved else k + 1
 
         # Materialize

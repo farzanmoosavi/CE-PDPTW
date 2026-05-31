@@ -1170,8 +1170,18 @@ def _print_paper_table(aggregate: List[Dict[str, Any]], args: argparse.Namespace
         )
         print(line)
 
+        _ENERGY_TIER_LATEX = {
+            "gurobi": "T1", "ortools": "T1",
+            "alns": "T2", "offline_alns": "T2",
+            "ortools_vrp": "T3", "vns": "T3", "offline_vns": "T3",
+            "cw": "T4", "offline_cw": "T4",
+            "regret": "T4", "offline_regret": "T4",
+            "fifo": "T4", "greedy": "T4",
+        }
+        tier_tag = _ENERGY_TIER_LATEX.get(method, "")
+        tier_str = f" ({tier_tag})" if tier_tag else ""
         latex_rows.append(
-            f'  {method} & {n_success}/{n_runs}'
+            f'  {method}{tier_str} & {n_success}/{n_runs}'
             f' & ${service_mu:.1f}\\pm{service_sig:.1f}$\\%'
             f' & ${cost_per_req:.4f}\\pm{cost_per_req_std:.4f}$'
             f' & ${pu_ok_mu:.1f}\\pm{pu_ok_sig:.1f}$\\%'
@@ -1183,6 +1193,54 @@ def _print_paper_table(aggregate: List[Dict[str, Any]], args: argparse.Namespace
     print(sep)
     print('  NOTE: HetGAT-RL rows can be appended from evaluate.py --paper-table output.')
     print('=' * len(header))
+
+    # ── Energy-tier gap analysis ──────────────────────────────────────────────
+    # Discloses the three energy-awareness tiers used across baselines so
+    # reviewers can correctly interpret gaps between methods.
+    _ENERGY_TIER = {
+        # T1: battery is a decision variable; recharge stops planned optimally
+        "gurobi":          ("T1", "Battery-joint MILP"),
+        "ortools":         ("T1", "Battery-joint MILP (OR-Tools)"),
+        # T2: energy evaluated in every search move (ALNS _materialize_ops)
+        "alns":            ("T2", "Energy-aware search"),
+        "offline_alns":    ("T2", "Energy-aware search (offline)"),
+        # T3: energy-adjusted planning (battery-aware transit / VNS objective) + reactive execution
+        "ortools_vrp":     ("T3", "Energy-adjusted CP-SAT"),
+        "vns":             ("T3", "Energy-adjusted VNS"),
+        "offline_vns":     ("T3", "Energy-adjusted VNS (offline)"),
+        # T4: routing ignores battery; recharge injected reactively at execution
+        "cw":              ("T4", "Reactive recharge only"),
+        "offline_cw":      ("T4", "Reactive recharge only (offline)"),
+        "regret":          ("T4", "Reactive recharge only"),
+        "offline_regret":  ("T4", "Reactive recharge only (offline)"),
+        "fifo":            ("T4", "Reactive recharge only"),
+        "greedy":          ("T4", "Reactive recharge only"),
+    }
+    tier_rows: Dict[str, List[float]] = {}
+    for row in aggregate:
+        bl = str(row.get('baseline', ''))
+        tier_id, _ = _ENERGY_TIER.get(bl, ("T?", "unknown"))
+        sr = float(row.get('delivered_rate_mean') or 0) * 100.0
+        tier_rows.setdefault(tier_id, []).append(sr)
+
+    if tier_rows:
+        print('\n  Energy-awareness tier summary (avg service rate across baselines in tier):')
+        print('  ' + '-' * 48)
+        tier_descriptions = {
+            "T1": "Battery-joint optimization (Gurobi/MILP)",
+            "T2": "Energy-aware search (ALNS)",
+            "T3": "Energy-adjusted planning + reactive exec (CP-SAT/VNS)",
+            "T4": "Reactive recharge only (CW/Regret/FIFO/Greedy)",
+        }
+        for tier_id in sorted(tier_rows):
+            srs = tier_rows[tier_id]
+            avg = sum(srs) / len(srs)
+            desc = tier_descriptions.get(tier_id, tier_id)
+            print(f'  {tier_id}: {avg:5.1f}% avg service  [{desc}]')
+        print('  ' + '-' * 48)
+        print('  Interpretation: T1 vs T2 gap = value of energy-joint optimization;')
+        print('                  T2 vs T3 gap = value of energy-aware search vs adjusted planning;')
+        print('                  T3 vs T4 gap = value of energy-adjusted planning vs reactive only.')
 
     scenario_label = getattr(args, 'scenario_label', '') or 'baseline'
     latex_path = Path(args.output_dir) / f'paper_table_{scenario_label}.tex'
