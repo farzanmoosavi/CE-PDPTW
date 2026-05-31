@@ -170,21 +170,24 @@ class ORToolsVRPRollingHorizonSolver:
         manager = pywrapcp.RoutingIndexManager(n_nodes, n_vehicles, starts, ends)
         routing = pywrapcp.RoutingModel(manager)
 
-        # Per-vehicle transit callbacks (UAV vs ADR have different speeds)
+        # Per-vehicle transit callbacks (UAV vs ADR have different speeds).
+        # Keep explicit references in _cb_refs so Python GC never collects
+        # a closure while the C++ solver is still holding a raw pointer to it.
         transit_indices: List[int] = []
+        _cb_refs: List = []
         modes = [v.normalized_mode() for v in veh_list]
 
+        def _make_cb(m):
+            def cb(fi, ti):
+                fp = phys[manager.IndexToNode(fi)]
+                tp = phys[manager.IndexToNode(ti)]
+                return _travel_int(fp, tp, m, n_depots, dm_uav, dm_adr)
+            return cb
+
         for v_i, mode in enumerate(modes):
-            captured_mode = mode
-
-            def _make_cb(m):
-                def cb(fi, ti):
-                    fp = phys[manager.IndexToNode(fi)]
-                    tp = phys[manager.IndexToNode(ti)]
-                    return _travel_int(fp, tp, m, n_depots, dm_uav, dm_adr)
-                return cb
-
-            cb_idx = routing.RegisterTransitCallback(_make_cb(captured_mode))
+            cb = _make_cb(mode)
+            _cb_refs.append(cb)
+            cb_idx = routing.RegisterTransitCallback(cb)
             transit_indices.append(cb_idx)
             routing.SetArcCostEvaluatorOfVehicle(cb_idx, v_i)
 
@@ -209,6 +212,7 @@ class ORToolsVRPRollingHorizonSolver:
         def demand_cb(idx):
             return demand_scaled[manager.IndexToNode(idx)]
 
+        _cb_refs.append(demand_cb)
         demand_cb_idx = routing.RegisterUnaryTransitCallback(demand_cb)
         routing.AddDimensionWithVehicleCapacity(
             demand_cb_idx,
