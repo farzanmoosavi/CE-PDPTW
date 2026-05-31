@@ -228,8 +228,10 @@ class ORToolsVRPRollingHorizonSolver:
                 req_i = node - dliv_off
                 demand_by_idx[ort_idx] = -int(round(req_list[req_i].demand * 100))
 
-        # Callbacks: pure list lookups, zero C++/numpy calls inside
-        transit_indices: List[int] = []
+        # Callbacks: pure list lookups, zero C++/numpy calls inside.
+        # Register exactly 2 transit callbacks (one per mode) shared across all vehicles.
+        # Registering n_vehicles separate closures triggers a CC cluster-specific segfault
+        # when GLS calls Python callbacks from its C++ thread pool.
         _cb_refs: List = []
         modes = [v.normalized_mode() for v in veh_list]
 
@@ -238,10 +240,15 @@ class ORToolsVRPRollingHorizonSolver:
                 return cost_mat[fi][ti]
             return cb
 
+        uav_cb = _make_cost_cb(cost_uav)
+        adr_cb = _make_cost_cb(cost_adr)
+        _cb_refs.extend([uav_cb, adr_cb])
+        uav_cb_idx = routing.RegisterTransitCallback(uav_cb)
+        adr_cb_idx = routing.RegisterTransitCallback(adr_cb)
+
+        transit_indices: List[int] = []
         for v_i, mode in enumerate(modes):
-            cb = _make_cost_cb(cost_uav if mode == "uav" else cost_adr)
-            _cb_refs.append(cb)
-            cb_idx = routing.RegisterTransitCallback(cb)
+            cb_idx = uav_cb_idx if mode == "uav" else adr_cb_idx
             transit_indices.append(cb_idx)
             routing.SetArcCostEvaluatorOfVehicle(cb_idx, v_i)
 
@@ -299,13 +306,15 @@ class ORToolsVRPRollingHorizonSolver:
             time_dim.CumulVar(routing.Start(v_i)).SetRange(0, 0)
             time_dim.CumulVar(routing.End(v_i)).SetRange(0, HORIZON_INT)
 
-        # Search parameters
+        # Search parameters.
+        # GREEDY_DESCENT avoids the C++ thread pool used by GUIDED_LOCAL_SEARCH;
+        # GLS calls Python callbacks from non-GIL threads, causing SIGSEGV on CC.
         params = pywrapcp.DefaultRoutingSearchParameters()
         params.first_solution_strategy = (
             routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION
         )
         params.local_search_metaheuristic = (
-            routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+            routing_enums_pb2.LocalSearchMetaheuristic.GREEDY_DESCENT
         )
         params.time_limit.seconds = int(self.time_limit_seconds)
         params.log_search = False
