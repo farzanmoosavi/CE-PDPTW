@@ -51,13 +51,36 @@ fi
 # routing engine used by ortools_vrp baseline.  Also probes for ABI issues.
 _HAVE_VRP=false
 echo "Testing OR-Tools VRP routing (pywrapcp) backend..."
-if timeout 30 python -c "
+if timeout 60 python -c "
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-mgr = pywrapcp.RoutingIndexManager(4, 1, [0], [3])
+# Realistic probe: exercises AddDimensionWithVehicleTransits,
+# AddDimensionWithVehicleCapacity, and AddPickupAndDelivery —
+# the exact calls used in the real solver.  A shallow probe
+# (arc-cost only) passes even on nodes with ABI issues.
+# nodes: 0=dummy-end  1=veh-start  2=pickup  3=delivery
+mgr = pywrapcp.RoutingIndexManager(4, 1, [1], [0])
 rt = pywrapcp.RoutingModel(mgr)
-def tt(fi, ti): return 1
-cb = rt.RegisterTransitCallback(tt)
-rt.SetArcCostEvaluatorOfAllVehicles(cb)
+phys = [0, 1, 2, 3]
+def make_cb():
+    def cb(fi, ti):
+        return abs(phys[mgr.IndexToNode(fi)] - phys[mgr.IndexToNode(ti)])
+    return cb
+cb = make_cb()
+cb_refs = [cb]
+cb_idx = rt.RegisterTransitCallback(cb)
+rt.SetArcCostEvaluatorOfVehicle(cb_idx, 0)
+rt.AddDimensionWithVehicleTransits([cb_idx], 100, 1000, False, 'Time')
+td = rt.GetDimensionOrDie('Time')
+dem = [0, 0, 1, -1]
+def dcb(i): return dem[mgr.IndexToNode(i)]
+cb_refs.append(dcb)
+dcb_idx = rt.RegisterUnaryTransitCallback(dcb)
+rt.AddDimensionWithVehicleCapacity(dcb_idx, 0, [10], True, 'Cap')
+pick = mgr.NodeToIndex(2)
+dliv = mgr.NodeToIndex(3)
+rt.AddPickupAndDelivery(pick, dliv)
+slv = rt.solver()
+slv.Add(rt.VehicleVar(pick) == rt.VehicleVar(dliv))
 p = pywrapcp.DefaultRoutingSearchParameters()
 p.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
 sol = rt.SolveWithParameters(p)
