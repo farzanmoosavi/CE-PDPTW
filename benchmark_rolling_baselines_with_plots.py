@@ -424,13 +424,23 @@ def run_one_rl_baseline(
         return failed_row('rl', instance_id, exc, wall_time)
 
 def _ortools_vrp_worker(result_queue: multiprocessing.Queue, payload: bytes) -> None:
+    import sys, traceback
+    def _log(msg):
+        print(f"[ortools_vrp_worker] {msg}", flush=True, file=sys.stderr)
+    _log("process started")
     try:
         kwargs = pickle.loads(payload)
+        _log(f"payload loaded: n_uav={kwargs.get('n_uav')} n_adr={kwargs.get('n_adr')}")
         from ce_cpdptw_ortools_vrp import solve_static_instance_with_ortools_vrp_rolling
+        _log("solver imported")
         result = solve_static_instance_with_ortools_vrp_rolling(**kwargs)
+        _log(f"solve done: {len(result)} log entries")
         result_queue.put(pickle.dumps(('ok', result)))
+        _log("result queued OK")
     except Exception as exc:
-        result_queue.put(pickle.dumps(('err', str(exc))))
+        _log(f"EXCEPTION: {type(exc).__name__}: {exc}")
+        _log(traceback.format_exc())
+        result_queue.put(pickle.dumps(('err', f"{type(exc).__name__}: {exc}")))
 
 
 def _ortools_vrp_isolated(full_instance: Dict[str, Any], **kwargs) -> List[Dict[str, Any]]:
@@ -440,6 +450,7 @@ def _ortools_vrp_isolated(full_instance: Dict[str, Any], **kwargs) -> List[Dict[
     conflict that causes SIGSEGV on CC clusters.  If the subprocess crashes
     or times out it raises RuntimeError so the benchmark records a failure.
     """
+    import sys
     timeout = float(kwargs.get("time_limit_seconds", 10.0)) * 3 + 60
     payload = pickle.dumps({"full_instance": full_instance, **kwargs})
     ctx = multiprocessing.get_context("spawn")
@@ -452,8 +463,15 @@ def _ortools_vrp_isolated(full_instance: Dict[str, Any], **kwargs) -> List[Dict[
         p.join()
         raise RuntimeError("ortools_vrp subprocess timed out")
     if p.exitcode != 0:
-        raise RuntimeError(f"ortools_vrp subprocess crashed (exit {p.exitcode})")
-    status, result = pickle.loads(q.get_nowait())
+        # Negative exit = killed by signal (e.g. -11 = SIGSEGV, -6 = SIGABRT)
+        sig = -p.exitcode if p.exitcode < 0 else None
+        sig_name = {11: "SIGSEGV", 6: "SIGABRT", 9: "SIGKILL"}.get(sig, f"signal {sig}")
+        print(f"[ortools_vrp] subprocess exit {p.exitcode} ({sig_name})", flush=True, file=sys.stderr)
+        raise RuntimeError(f"ortools_vrp subprocess crashed (exit {p.exitcode}, {sig_name})")
+    try:
+        status, result = pickle.loads(q.get_nowait())
+    except Exception as exc:
+        raise RuntimeError(f"ortools_vrp: no result in queue after clean exit: {exc}")
     if status != "ok":
         raise RuntimeError(f"ortools_vrp error: {result}")
     return result
@@ -540,6 +558,8 @@ def run_one_baseline(
             episode_log = dispatcher.run_shift(arrivals, fleet, full_instance)
 
         elif baseline == "gurobi":
+            import os, sys
+            print(f"[gurobi] GRB_LICENSE_FILE={os.environ.get('GRB_LICENSE_FILE', '(not set)')}", flush=True, file=sys.stderr)
             config = ExactRollingConfig(
                 n_uav=n_uav,
                 n_adr=n_adr,
@@ -550,10 +570,12 @@ def run_one_baseline(
                 shift_minutes=shift_minutes,
                 time_limit_seconds=exact_time_limit_seconds,
                 mip_gap=exact_mip_gap,
-                log_to_console=False,
+                log_to_console=True,
                 n_threads=gurobi_threads,
             )
+            print(f"[gurobi] calling solve_static_instance_with_gurobi_rolling...", flush=True, file=sys.stderr)
             episode_log = solve_static_instance_with_gurobi_rolling(full_instance, config)
+            print(f"[gurobi] solve done", flush=True, file=sys.stderr)
 
         elif baseline == "ortools":
             config = ExactRollingConfig(

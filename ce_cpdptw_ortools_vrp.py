@@ -109,7 +109,13 @@ class ORToolsVRPRollingHorizonSolver:
         self.latest_delivery_slack = latest_delivery_slack
 
     def solve(self, residual: Dict[str, Any]) -> Dict[int, List[Leg]]:
+        import sys
+        def _log(msg: str) -> None:
+            print(f"[ORToolsVRP] {msg}", flush=True, file=sys.stderr)
+
+        _log("solve() called")
         from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+        _log("pywrapcp imported")
 
         vehicles: Dict[int, Vehicle] = residual["vehicles"]
         active_requests: Dict[int, Request] = residual["active_requests"]
@@ -132,11 +138,13 @@ class ORToolsVRPRollingHorizonSolver:
         ]
 
         if not waiting_requests or not available_vehicle_ids:
+            _log("no work — returning early")
             return routes
 
         n_vehicles = len(available_vehicle_ids)
         n_requests = len(waiting_requests)
         n_depots = int(full_instance["n_depots"])
+        _log(f"n_vehicles={n_vehicles} n_requests={n_requests} n_depots={n_depots}")
 
         # OR-Tools node layout:
         #   0                                  : dummy end depot
@@ -167,8 +175,11 @@ class ORToolsVRPRollingHorizonSolver:
         starts = list(range(veh_off, veh_off + n_vehicles))
         ends = [DUMMY_END] * n_vehicles
 
+        _log(f"building RoutingIndexManager: n_nodes={n_nodes} n_vehicles={n_vehicles}")
         manager = pywrapcp.RoutingIndexManager(n_nodes, n_vehicles, starts, ends)
+        _log("RoutingIndexManager OK")
         routing = pywrapcp.RoutingModel(manager)
+        _log("RoutingModel OK")
 
         # Per-vehicle transit callbacks (UAV vs ADR have different speeds).
         # Keep explicit references in _cb_refs so Python GC never collects
@@ -190,10 +201,12 @@ class ORToolsVRPRollingHorizonSolver:
             cb_idx = routing.RegisterTransitCallback(cb)
             transit_indices.append(cb_idx)
             routing.SetArcCostEvaluatorOfVehicle(cb_idx, v_i)
+        _log(f"registered {len(transit_indices)} transit callbacks")
 
         # Time dimension with per-vehicle transit
         HORIZON_INT = int(1000 * _TIME_SCALE)
         SLACK_INT = int(60 * _TIME_SCALE)
+        _log("calling AddDimensionWithVehicleTransits...")
         routing.AddDimensionWithVehicleTransits(
             transit_indices,
             SLACK_INT,
@@ -201,6 +214,7 @@ class ORToolsVRPRollingHorizonSolver:
             False,
             "Time",
         )
+        _log("AddDimensionWithVehicleTransits OK")
         time_dim = routing.GetDimensionOrDie("Time")
 
         # Capacity dimension
@@ -214,6 +228,7 @@ class ORToolsVRPRollingHorizonSolver:
 
         _cb_refs.append(demand_cb)
         demand_cb_idx = routing.RegisterUnaryTransitCallback(demand_cb)
+        _log("calling AddDimensionWithVehicleCapacity...")
         routing.AddDimensionWithVehicleCapacity(
             demand_cb_idx,
             0,
@@ -221,9 +236,11 @@ class ORToolsVRPRollingHorizonSolver:
             True,
             "Capacity",
         )
+        _log("AddDimensionWithVehicleCapacity OK")
 
         # Pickup-delivery pairs with same-vehicle and precedence constraints
         solver = routing.solver()
+        _log(f"adding {len(req_list)} pickup-delivery pairs...")
         for i, req in enumerate(req_list):
             pick_idx = manager.NodeToIndex(pick_off + i)
             dliv_idx = manager.NodeToIndex(dliv_off + i)
@@ -261,7 +278,9 @@ class ORToolsVRPRollingHorizonSolver:
         params.time_limit.seconds = int(self.time_limit_seconds)
         params.log_search = False
 
+        _log("calling SolveWithParameters...")
         solution = routing.SolveWithParameters(params)
+        _log(f"SolveWithParameters returned: {'solution found' if solution else 'None'}")
         if solution is None:
             return routes
 
