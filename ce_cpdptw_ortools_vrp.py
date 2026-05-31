@@ -181,22 +181,78 @@ class ORToolsVRPRollingHorizonSolver:
         routing = pywrapcp.RoutingModel(manager)
         _log("RoutingModel OK")
 
-        # Per-vehicle transit callbacks (UAV vs ADR have different speeds).
-        # Keep explicit references in _cb_refs so Python GC never collects
-        # a closure while the C++ solver is still holding a raw pointer to it.
+        # Precompute everything into pure Python lists before registering callbacks.
+        # Calling manager.IndexToNode() or numpy array access from inside a callback
+        # causes SIGSEGV on CC because OR-Tools calls Python callbacks from its
+        # internal C++ thread pool — the C++→Python→C++ boundary crossing is unsafe.
+        # Solution: build index→phys and full cost matrices as Python int lists here,
+        # so callbacks only do O(1) list lookups with no C++ or numpy calls.
+
+        # OR-Tools internal index → physical grid node
+        idx_to_phys: List[int] = [0] * n_nodes
+        for node in range(n_nodes):
+            ort_idx = manager.NodeToIndex(node)
+            if 0 <= ort_idx < n_nodes:
+                idx_to_phys[ort_idx] = phys[node]
+
+        # Convert distance matrices to Python float lists once
+        dm_uav_list: List[List[float]] = dm_uav.tolist()
+        dm_adr_list: List[List[float]] = dm_adr.tolist()
+        n_phys_uav = len(dm_uav_list)
+        n_phys_adr = len(dm_adr_list)
+
+        def _travel_pure(fp: int, tp: int, mode: str) -> int:
+            if fp == tp:
+                return 0
+            dm = dm_uav_list if mode == "uav" else dm_adr_list
+            n_p = n_phys_uav if mode == "uav" else n_phys_adr
+            if fp < 0 or tp < 0 or fp >= n_p or tp >= n_p:
+                return _BIG_M_INT
+            dist = dm[fp][tp]
+            if not math.isfinite(dist) or dist >= 1e9:
+                return _BIG_M_INT
+            to_is_depot = tp < n_depots
+            from_is_customer = fp >= n_depots
+            speed = _depot_speed(mode) if (to_is_depot and from_is_customer) else _cruise_speed(mode)
+            travel_min = dist / max(speed, 1e-9)
+            svc = _service_time(mode) if not to_is_depot else 0.0
+            return int((travel_min + svc) * _TIME_SCALE)
+
+        # Precompute cost matrices keyed by OR-Tools index pairs (pure Python ints)
+        _log("precomputing cost matrices...")
+        cost_uav: List[List[int]] = [
+            [_travel_pure(idx_to_phys[i], idx_to_phys[j], "uav") for j in range(n_nodes)]
+            for i in range(n_nodes)
+        ]
+        cost_adr: List[List[int]] = [
+            [_travel_pure(idx_to_phys[i], idx_to_phys[j], "adr") for j in range(n_nodes)]
+            for i in range(n_nodes)
+        ]
+        _log("cost matrices ready")
+
+        # Demand vector keyed by OR-Tools index (pure Python ints)
+        demand_by_idx: List[int] = [0] * n_nodes
+        for node in range(n_nodes):
+            ort_idx = manager.NodeToIndex(node)
+            if node >= pick_off and node < dliv_off:
+                req_i = node - pick_off
+                demand_by_idx[ort_idx] = int(round(req_list[req_i].demand * 100))
+            elif node >= dliv_off:
+                req_i = node - dliv_off
+                demand_by_idx[ort_idx] = -int(round(req_list[req_i].demand * 100))
+
+        # Callbacks: pure list lookups, zero C++/numpy calls inside
         transit_indices: List[int] = []
         _cb_refs: List = []
         modes = [v.normalized_mode() for v in veh_list]
 
-        def _make_cb(m):
-            def cb(fi, ti):
-                fp = phys[manager.IndexToNode(fi)]
-                tp = phys[manager.IndexToNode(ti)]
-                return _travel_int(fp, tp, m, n_depots, dm_uav, dm_adr)
+        def _make_cost_cb(cost_mat: List[List[int]]):
+            def cb(fi: int, ti: int) -> int:
+                return cost_mat[fi][ti]
             return cb
 
         for v_i, mode in enumerate(modes):
-            cb = _make_cb(mode)
+            cb = _make_cost_cb(cost_uav if mode == "uav" else cost_adr)
             _cb_refs.append(cb)
             cb_idx = routing.RegisterTransitCallback(cb)
             transit_indices.append(cb_idx)
@@ -218,13 +274,8 @@ class ORToolsVRPRollingHorizonSolver:
         time_dim = routing.GetDimensionOrDie("Time")
 
         # Capacity dimension
-        demand_scaled = [0] * n_nodes
-        for i, r in enumerate(req_list):
-            demand_scaled[pick_off + i] = int(round(r.demand * 100))
-            demand_scaled[dliv_off + i] = -int(round(r.demand * 100))
-
-        def demand_cb(idx):
-            return demand_scaled[manager.IndexToNode(idx)]
+        def demand_cb(idx: int) -> int:
+            return demand_by_idx[idx]
 
         _cb_refs.append(demand_cb)
         demand_cb_idx = routing.RegisterUnaryTransitCallback(demand_cb)
