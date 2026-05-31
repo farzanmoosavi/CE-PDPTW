@@ -1230,10 +1230,12 @@ def _print_paper_table(aggregate: List[Dict[str, Any]], args: argparse.Namespace
         # T2: energy evaluated in every search move (ALNS _materialize_ops)
         "alns":              ("T2", "Energy-aware search"),
         "offline_alns":      ("T2", "Energy-aware search (offline)"),
-        # T3: energy-adjusted planning (battery-aware transit / VNS objective) + reactive execution
-        "ortools_vrp":       ("T3", "Energy-adjusted CP-SAT"),
-        "vns":               ("T3", "Energy-adjusted VNS"),
-        "offline_vns":       ("T3", "Energy-adjusted VNS (offline)"),
+        # T3: VNS uses physics-accurate objective; CP-SAT uses reactive recharge only
+        # (battery-adjusted transit in CP-SAT caused false infeasibility: inflated transit
+        # >> time window → solver skips all requests; reverted to pure reactive handling)
+        "ortools_vrp":       ("T3", "Reactive recharge (CP-SAT routing)"),
+        "vns":               ("T3", "Energy-aware VNS objective + reactive exec"),
+        "offline_vns":       ("T3", "Energy-aware VNS objective + reactive exec (offline)"),
         # T4: routing ignores battery; recharge injected reactively at execution
         "cw":                ("T4", "Reactive recharge only"),
         "offline_cw":        ("T4", "Reactive recharge only (offline)"),
@@ -1258,7 +1260,7 @@ def _print_paper_table(aggregate: List[Dict[str, Any]], args: argparse.Namespace
             "T1":  "Battery-joint optimization (Gurobi/MILP)",
             "T1*": "MILP routing only, no battery (ablation control)",
             "T2":  "Energy-aware search (ALNS)",
-            "T3":  "Energy-adjusted planning + reactive exec (CP-SAT/VNS)",
+            "T3":  "VNS: energy-aware objective; CP-SAT: reactive recharge only",
             "T4":  "Reactive recharge only (CW/Regret/FIFO/Greedy)",
         }
         for tier_id in sorted(tier_rows):
