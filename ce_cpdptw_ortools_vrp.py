@@ -179,10 +179,11 @@ class CPSATVRPRollingHorizonSolver:
         tw_hi: List[int] = [HORIZON] * N
         for i, req in enumerate(req_list):
             ep = max(0.0, req.t_arrival - current_time)
-            lp = max(req.t_pickup - current_time + self.latest_pickup_slack, ep + 1.0)
             ld = max(req.t_delivery - current_time + self.latest_delivery_slack, 0.0)
             tw_lo[PICK(i)] = int(ep * TSCALE)
-            tw_hi[PICK(i)] = int(lp * TSCALE)
+            # tw_hi[PICK(i)] stays HORIZON — no hard pickup deadline.
+            # ALNS treats pickup time as a soft penalty; imposing a hard deadline here
+            # causes all late-pickup requests to become infeasible in CP-SAT → 0% service.
             tw_hi[DLIV(i)] = int(ld * TSCALE)
 
         # ── Build CP-SAT model ──────────────────────────────────────────────
@@ -244,8 +245,14 @@ class CPSATVRPRollingHorizonSolver:
             model.add(t[k][DEPOT(k)] == 0)
 
         # Time propagation: if arc k n→m is used, t[k][m] ≥ t[k][n] + transit.
+        # Skip arcs returning to depot: t[k][DEPOT(k)]==0 is the departure time, not
+        # the return arrival time.  Propagating return arcs creates t[DEPOT]≥large_value
+        # which contradicts t[DEPOT]==0 and makes every served route INFEASIBLE.
         for k in range(n_veh):
+            depot_n = DEPOT(k)
             for (n, m), a_var in arc[k].items():
+                if m == depot_n:
+                    continue  # do not propagate into the depot's time variable
                 tr = tran[k][n][m]
                 if tr > 0:
                     model.add(t[k][m] >= t[k][n] + tr).only_enforce_if(a_var)
